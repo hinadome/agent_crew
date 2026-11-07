@@ -212,6 +212,17 @@ class TasksConfig(_Cfg):
     max_attempts: int = 3
     task_timeout_s: int = 3600
     agent: str | None = None  # agent used to execute tasks; defaults to the entry agent
+    verify: bool = True  # check finished tasks that declared `done_when` against it (one cheap model call)
+    verify_all: bool = False  # also judge tasks without `done_when` against their goal
+    max_verify_rounds: int = 2  # how many times the agent is sent back to fix an unmet result
+
+
+class LimitsConfig(_Cfg):
+    """Guard rails against runaway agents. 0 disables a limit. Counted per chat turn / per task run."""
+    chat_tool_calls: int = 40
+    task_tool_calls: int = 200
+    repeat_limit: int = 3  # the same tool with identical arguments this many times in a row is blocked
+    grace_calls: int = 3  # blocked calls tolerated before the run is stopped hard
 
 
 class Config(_Cfg):
@@ -222,6 +233,7 @@ class Config(_Cfg):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     conversation: ConversationConfig = Field(default_factory=ConversationConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
+    limits: LimitsConfig = Field(default_factory=LimitsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     web_ui: WebUIConfig = Field(default_factory=WebUIConfig)

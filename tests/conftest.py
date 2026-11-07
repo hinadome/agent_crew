@@ -32,6 +32,9 @@ class ScriptedModel(Model):
         self.fail = False  # raise instead of answering
         self.delay = 0.0  # sleep before answering (for timeouts)
         self.reply: str | None = None  # fixed reply text
+        self.replies: list[str] = []  # consumed one per call before falling back to `reply`
+        self.always_tool: tuple[str, str] | None = None  # call this tool (name, json args) on every call
+        self.n_tool_calls = 0  # tool calls this model has requested
 
     def update_config(self, **kwargs: Any) -> None:
         pass
@@ -55,14 +58,18 @@ class ScriptedModel(Model):
         got_tool_result = any("toolResult" in b for b in last["content"])
         yield {"messageStart": {"role": "assistant"}}
         marker = None if got_tool_result else TOOL_MARKER.search(text)
-        if marker:
-            yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": f"tu_{marker.group(1)}",
-                                                               "name": marker.group(1)}}}}
-            yield {"contentBlockDelta": {"delta": {"toolUse": {"input": marker.group(2)}}}}
+        tool_call: tuple[str, str] | None = (marker.group(1), marker.group(2)) if marker else None
+        if self.always_tool:  # a model that never stops calling tools
+            tool_call = self.always_tool
+        if tool_call:
+            self.n_tool_calls += 1
+            yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": f"tu_{tool_call[0]}_{self.n_tool_calls}",
+                                                               "name": tool_call[0]}}}}
+            yield {"contentBlockDelta": {"delta": {"toolUse": {"input": tool_call[1]}}}}
             yield {"contentBlockStop": {}}
             yield {"messageStop": {"stopReason": "tool_use"}}
         else:
-            out = self.reply if self.reply is not None else f"[{self.tag}] ok: {text[:80]}"
+            out = self.replies.pop(0) if self.replies else self.reply if self.reply is not None else f"[{self.tag}] ok: {text[:80]}"
             yield {"contentBlockDelta": {"delta": {"text": out}}}
             yield {"contentBlockStop": {}}
             yield {"messageStop": {"stopReason": "end_turn"}}

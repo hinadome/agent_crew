@@ -14,10 +14,14 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from strands import Agent
+
+from ..agents.budget import find_budget_error
 from ..core.context import AppContext
 from ..core.logging import end_turn, start_turn
 from ..core.types import Address
 from . import store as S
+from .verify import verify
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,14 @@ TASK_PROMPT = (
     "You are executing a long-running background task autonomously. Work step by step, use tools, and call "
     "`report_progress` after each meaningful milestone (it is saved, so work can resume if interrupted). "
     "Do not ask the user questions; make reasonable assumptions and state them. When finished, reply with the "
-    "final deliverable only."
+    "final deliverable only. If completion criteria are given, your result will be checked against them: "
+    "make sure each one is visibly satisfied in your final reply."
+)
+
+FIX_PROMPT = (
+    "A reviewer checked your result against the completion criteria and found it NOT complete.\n"
+    "Criteria: {criteria}\nProblem: {feedback}\n"
+    "Fix this now (use tools if needed) and reply with the complete, corrected final deliverable."
 )
 
 
@@ -106,22 +117,29 @@ class TaskRunner:
             factory = self.ctx.services["agent_factory"]
             agent = factory.create(task.agent or self.cfg.agent, session_id=task.session_id, origin=task.address,
                                    user_id=task.user_id or "task", extra_prompt=TASK_PROMPT, task_id=task.id)
-            prompt = (f"Task: {task.title}\n\nGoal:\n{task.goal}" if task.attempts <= 1 else
+            criteria = f"\n\nCompletion criteria (your result will be checked against these):\n{task.done_when}" \
+                if task.done_when else ""
+            prompt = (f"Task: {task.title}\n\nGoal:\n{task.goal}{criteria}" if task.attempts <= 1 else
                       "You were interrupted. Review your previous work in this conversation and continue the task "
-                      f"to completion.\nGoal: {task.goal}\nProgress so far:\n" + "\n".join(task.progress[-10:]))
-            result = await asyncio.wait_for(agent.invoke_async(prompt), timeout=self.cfg.task_timeout_s)
-            text = str(result).strip() or "(no output)"
+                      f"to completion.\nGoal: {task.goal}{criteria}\nProgress so far:\n"
+                      + "\n".join(task.progress[-10:]))
+            text, note = await asyncio.wait_for(self._work(task, agent, prompt), timeout=self.cfg.task_timeout_s)
             self.store.finish(task.id, S.SUCCEEDED, result=text)
             if task.quiet_token and text.upper().startswith(task.quiet_token.upper()):
                 logger.info("Task %s finished quietly (%s)", task.id, task.quiet_token)
                 return
-            await self._tell(task, f"Task [{task.id}] done: {task.title}\n\n{text}")
+            await self._tell(task, f"Task [{task.id}] done: {task.title}\n\n{note}{text}")
         except asyncio.CancelledError:
             current = self.store.get(task.id)
             if current and current.status == S.CANCELLED:
                 await self._tell(task, f"Task [{task.id}] cancelled.")
             raise
         except Exception as e:
+            if (stop := find_budget_error(e)) is not None:  # retrying would only burn the same budget again
+                logger.warning("Task %s stopped: %s", task.id, stop)
+                self.store.finish(task.id, S.FAILED, error=str(stop))
+                await self._tell(task, f"Task [{task.id}] stopped: {stop}")
+                return
             logger.exception("Task %s failed", task.id)
             err = (f"timed out after {self.cfg.task_timeout_s}s" if isinstance(e, TimeoutError)
                    else f"{type(e).__name__}: {e}")
@@ -131,6 +149,28 @@ class TaskRunner:
             else:
                 self.store.finish(task.id, S.FAILED, error=err)
                 await self._tell(task, f"Task [{task.id}] failed after {task.attempts} attempts: {err}")
+
+    async def _work(self, task: S.Task, agent: Agent, prompt: str) -> tuple[str, str]:
+        """Run the agent, then (when the task has criteria) verify and send it back to fix gaps. -> (text, note)."""
+        text = str(await agent.invoke_async(prompt)).strip() or "(no output)"
+        if task.quiet_token or not self.cfg.verify or not (task.done_when or self.cfg.verify_all):
+            return text, ""
+        criteria = task.done_when or "The result fully accomplishes the goal."
+        fixes = 0
+        while True:
+            v = await verify(self.ctx, task.goal, criteria, text)
+            if v.met:
+                self.store.add_progress(task.id, "verified: completion criteria met")
+                return text, ""
+            if v.met is None:
+                self.store.add_progress(task.id, f"verification inconclusive: {v.feedback}")
+                return text, "(Completion could not be verified.)\n\n"
+            self.store.add_progress(task.id, f"verification found a gap: {v.feedback}"[:300])
+            if fixes >= self.cfg.max_verify_rounds:
+                return text, f"WARNING - not confirmed complete after {fixes} fix round(s). Missing: {v.feedback}\n\n"
+            fixes += 1
+            text = str(await agent.invoke_async(
+                FIX_PROMPT.format(criteria=criteria, feedback=v.feedback))).strip() or text
 
     async def _tell(self, task: S.Task, text: str) -> None:
         if task.address:

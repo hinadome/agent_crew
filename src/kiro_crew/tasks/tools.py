@@ -14,7 +14,7 @@ from ..tools import tool_factories
 @tool_factories.register("tasks")
 def _tasks(ctx: AppContext) -> Any:
     @tool(context=True)
-    def start_task(title: str, goal: str, tool_context: ToolContext) -> str:
+    def start_task(title: str, goal: str, tool_context: ToolContext, done_when: str = "") -> str:
         """Start a long-running background task (research, multi-step coding, large analysis...).
         It runs independently; the user is notified in this chat when it finishes. Use this instead
         of doing slow multi-step work inline. Write the goal so it is fully self-contained.
@@ -22,11 +22,15 @@ def _tasks(ctx: AppContext) -> Any:
         Args:
             title: Short label (under 60 chars).
             goal: Complete, self-contained instructions including desired deliverable format.
+            done_when: Optional, concrete and checkable completion criteria (for example "a file report.md exists
+                with at least 3 sources" or "the answer states the price in EUR"). The result is verified against
+                it and the agent is sent back to fix gaps, so state what "done" means.
         """
         st = tool_context.agent.state
         origin = st.get("origin")
         addr = Address(**origin) if origin else None
-        t = ctx.tasks.create(title, goal, agent=st.get("agent_name"), address=addr, user_id=st.get("user_id"))
+        t = ctx.tasks.create(title, goal, agent=st.get("agent_name"), address=addr, user_id=st.get("user_id"),
+                           done_when=done_when.strip() or None)
         if (runner := ctx.services.get("task_runner")):
             runner.wake()
         return f"Started task {t.id}. The user will be notified on completion."

@@ -156,10 +156,11 @@ class InMemoryTaskStore:
         return replace(t, progress=list(t.progress))
 
     def create(self, title: str, goal: str, *, agent: str | None, address: Address | None, user_id: str | None,
-               quiet_token: str | None = None) -> S.Task:
+               quiet_token: str | None = None, done_when: str | None = None) -> S.Task:
         now = time.time()
         t = S.Task(id=uuid.uuid4().hex[:8], title=title, goal=goal, status=S.QUEUED, agent=agent, address=address,
-                   user_id=user_id, attempts=0, created_at=now, updated_at=now, quiet_token=quiet_token)
+                   user_id=user_id, attempts=0, created_at=now, updated_at=now, quiet_token=quiet_token,
+                   done_when=done_when)
         with self._lock:
             self._tasks[t.id] = t
             self._not_before[t.id] = 0.0

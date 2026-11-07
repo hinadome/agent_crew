@@ -162,6 +162,7 @@ Research the pros and cons of SQLite vs PostgreSQL for a small web app. Take you
 Expected: the lead agent starts a background task ("Started task ...") and the chat stays usable. When it finishes
 you get `Task [id] done: ...`.
 Check: `/tasks`; the output file appears in `~/.kiro-crew/files/db-notes.md`. Cancel with `/cancel ID`.
+Tip: tell it what "done" means, for example `... Done when the file lists at least 3 sources.` The lead agent passes this as completion criteria; when the task ends, a reviewer checks the result and sends the agent back to fix gaps (twice at most), and you get a `WARNING` if it still falls short. A stuck agent (repeating the same call, or using far too many tool calls) is stopped; see `limits:` in the config.
 The `researcher` agent needs the `web` tool (already in the sample config) to browse. Add a search key to enable
 search, not just page fetching: set `tool_options.web.search: brave` and `api_key` **(needs your account)**.
 

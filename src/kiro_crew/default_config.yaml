@@ -56,6 +56,21 @@ tasks:
   workers: 2
   max_attempts: 3
   task_timeout_s: 3600
+  # Completion check: when a task declares `done_when` (the agent sets it in start_task), a separate tool-less model
+  # call (the `models.aux` profile, else the default) judges the result. If unmet, the agent is sent back with the
+  # feedback, up to max_verify_rounds times; after that the result is still delivered, with a visible warning.
+  verify: true
+  verify_all: false               # true = also judge tasks that gave no criteria, against their goal
+  max_verify_rounds: 2
+
+# ---- Guard rails against runaway agents (0 disables a limit; counted per chat turn / per task run) ----
+# Past a limit the tool call is cancelled and the model is told why (so it can change course or wrap up). If it keeps
+# calling tools anyway, the run is stopped: chat users get a message, tasks fail without retrying.
+limits:
+  chat_tool_calls: 40
+  task_tool_calls: 200
+  repeat_limit: 3                 # identical tool + arguments this many times in a row is treated as a stuck loop
+  grace_calls: 3                  # blocked calls tolerated before the run is stopped
 
 # ---- Scheduler: reminders and recurring jobs the agent creates ("remind me at 9", "every morning...") ----
 scheduler:
@@ -139,7 +154,7 @@ agents:
     system_prompt: |
       You are the lead of a small crew of AI specialists. Answer simply questions yourself. Delegate focused
       work to specialists via their ask_* tools. For anything long or multi-step, call start_task so it runs
-      in the background and tell the user it has started. Store lasting facts with the memory tools.
+      in the background, state what "done" means in its done_when argument, and tell the user it has started. Store lasting facts with the memory tools.
       For reminders and recurring jobs call current_time first, then remind_me or schedule_job with an absolute
       time (e.g. 'at 2026-11-07 09:00') or an interval.
     tools: [time, tasks, schedule, files, core_memory]

@@ -8,7 +8,9 @@ specialist agents, and runs long jobs in the background without blocking the cha
   LiteLLM (100+ providers). Switch in YAML or with `/model` in chat. Optional automatic failover.
 - **Layered memory:** conversation summarising, durable session history, searchable long-term facts
   (keyword or semantic+keyword), editable `SOUL.md` / `MEMORY.md`, and `/memory` to list or forget facts.
-- **Long-running tasks:** durable queue, resumable sessions, retries, timeouts, cancel, progress.
+- **Long-running tasks:** durable queue, resumable sessions, retries, timeouts, cancel, progress. Tasks can declare
+  completion criteria (`done_when`); the result is **verified** and the agent is sent back to fix gaps.
+- **Guard rails for autonomy:** per-run tool-call budget and stuck-loop detection (steer first, then stop).
 - **Acts on its own:** reminders, recurring jobs and cron schedules, plus an optional **heartbeat** that only
   speaks when something needs you.
 - **Crew you can grow in seconds:** add an agent by dropping a markdown file (or `kiro-crew agent add`); a running bot picks
@@ -231,6 +233,19 @@ web_ui:
 Open `http://127.0.0.1:8787/?token=...` to watch logs stream live (filter by level/text, follow mode) and
 see current tasks, schedules and pairing requests. It is **read-only** and token-gated; it exposes
 conversation metadata, so keep it on localhost or behind your own auth/TLS.
+
+### Autonomy: completion checks and guard rails
+
+When the lead agent starts a background task it can state `done_when` ("a file report.md exists with 3 sources"). The
+worker is told the criteria up front. When it finishes, a separate tool-less model call (the `models.aux` profile if set)
+judges the result: if it is not met, the same agent session is sent back with the reviewer's feedback, at most
+`tasks.max_verify_rounds` times. The result is always delivered; if it is still unmet you get a visible `WARNING` with what
+is missing, and if the reviewer is unusable the message says it could not be verified. Set `tasks.verify_all: true` to judge
+tasks that gave no criteria against their goal, or `tasks.verify: false` to switch it off.
+
+`limits:` caps tool calls per chat turn / task run and detects an agent repeating the identical call. Past a limit the call is
+cancelled and the model is told why; if it ignores that, the run is stopped (chat: you get a message; task: it fails without
+retrying). Details and what is *not* covered: [specs/21-autonomy.md](specs/21-autonomy.md).
 
 ## How it fits together
 

@@ -343,3 +343,9 @@ def test_delete_prefix_is_literal_not_a_wildcard_pattern(st):
     s.create_session(Session("50%_off", SessionType.AGENT))
     s.create_session(Session("500_off", SessionType.AGENT))
     assert s.delete_prefix("50%") == 1 and s.read_session("500_off") is not None
+
+
+def test_task_done_when_roundtrip(st):
+    t = st.tasks.create("t", "goal", agent=None, address=ADDR, user_id="u", done_when="file x exists")
+    assert st.tasks.get(t.id).done_when == "file x exists"
+    assert st.tasks.create("t2", "goal", agent=None, address=ADDR, user_id="u").done_when is None

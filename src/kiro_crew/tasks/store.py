@@ -41,6 +41,7 @@ class Task:
     created_at: float = 0.0
     updated_at: float = 0.0
     quiet_token: str | None = None  # a result starting with this is not delivered (e.g. HEARTBEAT_OK)
+    done_when: str | None = None  # completion criteria the result is verified against
 
     @property
     def session_id(self) -> str:
@@ -55,7 +56,7 @@ def _row_to_task(r: Any) -> Task:
     addr = Address(r["channel"], r["conversation_id"], r["thread_id"]) if r["channel"] else None
     return Task(r["id"], r["title"], r["goal"], r["status"], r["agent"], addr, r["user_id"], r["attempts"],
                 json.loads(r["progress"]), r["result"], r["error"], r["created_at"], r["updated_at"],
-                r["quiet_token"])
+                r["quiet_token"], r["done_when"])
 
 
 class TaskStore:
@@ -65,15 +66,16 @@ class TaskStore:
         self.db = db
         db.script(_SCHEMA)
         db.ensure_column("tasks", "quiet_token", "TEXT")  # added after v0.1: upgrade older databases
+        db.ensure_column("tasks", "done_when", "TEXT")
 
     def create(self, title: str, goal: str, *, agent: str | None, address: Address | None,
-               user_id: str | None, quiet_token: str | None = None) -> Task:
+               user_id: str | None, quiet_token: str | None = None, done_when: str | None = None) -> Task:
         tid, now = uuid.uuid4().hex[:8], time.time()
         self.db.execute(
             "INSERT INTO tasks(id,title,goal,status,agent,channel,conversation_id,thread_id,user_id,"
-            "created_at,updated_at,quiet_token) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at,updated_at,quiet_token,done_when) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, title, goal, QUEUED, agent, address and address.channel, address and address.conversation_id,
-             address and address.thread_id, user_id, now, now, quiet_token))
+             address and address.thread_id, user_id, now, now, quiet_token, done_when))
         return self.get(tid)  # type: ignore[return-value]
 
     def get(self, task_id: str) -> Task | None:

@@ -15,6 +15,7 @@ from collections import OrderedDict
 
 from strands import Agent
 
+from .agents.budget import find_budget_error
 from .agents.factory import AgentFactory
 from .channels import Channel, chunk_text
 from .core.context import AppContext
@@ -133,7 +134,12 @@ class Gateway:
             async with lock:  # one turn at a time per conversation; later messages queue in order
                 try:
                     await self._process(ch, msg, key, route)
-                except Exception:
+                except Exception as e:
+                    if (stop := find_budget_error(e)) is not None:
+                        logger.warning("Turn stopped on %s: %s", key, stop)
+                        await self.send(msg.address, f"I had to stop: {stop}. Try rephrasing, or break the request "
+                                                     "into smaller steps (or ask me to run it as a background task).")
+                        return
                     logger.exception("Error handling message on %s", key)
                     await self.send(msg.address, "Sorry, something went wrong handling that. Please try again.")
         finally:

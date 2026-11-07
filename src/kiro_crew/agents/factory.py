@@ -22,6 +22,7 @@ from ..memory.factory import make_store
 from ..security.approval import ApprovalHook
 from ..tasks.tools import report_progress_tool
 from ..tools import resolve_tools
+from .budget import BudgetHook
 from .trace import TraceHook
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ class AgentFactory:
             memory_manager=self._memory_manager(user_id, name, extract=persistent and _depth == 0),
             session_manager=(RepositorySessionManager(session_id=session_id, session_repository=self.repo)
                              if session_id is not None else None),
-            hooks=self._hooks(acfg),
+            hooks=self._hooks(acfg, task_id),
             callback_handler=None,
         )
         # Set after construction so a restored session can never override routing info.
@@ -106,9 +107,12 @@ class AgentFactory:
         return MemoryManager(stores=[store], add_tool_config=m.allow_agent_writes and extract,
                              injection={"max_entries": m.inject_max_entries})
 
-    def _hooks(self, acfg: Any) -> list[Any]:
+    def _hooks(self, acfg: Any, task_id: str | None = None) -> list[Any]:
         manager = self.ctx.services.get("approvals")
+        lim = self.cfg.limits
         hooks: list[Any] = [TraceHook()]  # DEBUG-level tracing of tool/model/message activity
+        hooks.append(BudgetHook(lim.task_tool_calls if task_id else lim.chat_tool_calls, lim.repeat_limit,
+                                lim.grace_calls, per_invocation=task_id is None))
         if acfg.require_approval and manager is not None:
             hooks.append(ApprovalHook(manager, set(acfg.require_approval)))
         return hooks

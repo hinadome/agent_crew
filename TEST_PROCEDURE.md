@@ -30,7 +30,7 @@ uv run mypy                      # expect: Success: no issues found in 55 source
 ```bash
 uv run pytest -q -rs
 ```
-Expected: `392 passed, 30 deselected` (about 25 s). No network, no keys. The 30 deselected tests are the integration tests (Level 2/3).
+Expected: `421 passed, 30 deselected` (about 25 s). No network, no keys. The 30 deselected tests are the integration tests (Level 2/3).
 
 Useful variants:
 ```bash
@@ -116,6 +116,8 @@ Run inside `$K chat` unless stated. "Expect" lines are real outputs (times and i
 | (wait) | `Task [id] done: <title>` plus the result |
 | `/cancel <id>` | task stops |
 Tasks live in the DB and resume after a restart.
+
+Completion criteria (hermetic tests cover the verifier; the mock LLM cannot judge): `[[tool:start_task:{"title":"demo job","goal":"say done","done_when":"says done"}]]` stores the criteria; with the mock as reviewer the result is delivered with `(Completion could not be verified.)` because the mock never returns the required JSON. Guard rails: `uv run pytest tests/test_autonomy.py -q` (26 tests: stuck loops, budgets, verification). With a real LLM [NOT RUN], give a task a criterion it cannot meet and expect two fix rounds, then a `WARNING - not confirmed complete` message.
 
 ### 5.4 Reminders and schedules (verified)
 ```
