@@ -273,12 +273,12 @@ It stops when the app stops. Use `kiro-crew run` for an always-on dashboard.
 http://127.0.0.1:8787/?token=<your token>
 ```
 The page shows a connection status, a live log list (follow mode; filter by level or text), and tasks,
-schedules and pairing requests. Wrong or missing token: the page says `unauthorised` (HTTP 401).
+schedules and pairing requests. Wrong or missing token: the page itself still loads (it is only a layout), but it shows `unauthorised` and no data, because the data endpoints (`/api/...`) return HTTP 401. Test the password with `/api/state`, not `/`.
 For more detail in the log view, start with `-v`, or `--log AREA=debug` (section above).
 
 **4. Quick check from the terminal** (no browser needed):
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8787/api/state                       # 401 = password required
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8787/api/state                       # 401 = password required; 200 = NO token is set (check $KIRO_WEB_TOKEN)
 curl -s "http://127.0.0.1:8787/api/state?token=$KIRO_WEB_TOKEN" | head -c 300                  # JSON
 curl -s "http://127.0.0.1:8787/api/logs?token=$KIRO_WEB_TOKEN"  | head -c 300                  # recent log lines
 ```
