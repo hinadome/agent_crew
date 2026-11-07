@@ -243,11 +243,57 @@ uv run kiro-crew --log tools=debug --log agents=debug run
 (Use `--log AREA=LEVEL`; areas: gateway, agents, tasks, scheduler, memory, tools, channels, security, web_ui.)
 Your message text is hidden in logs and secrets are masked, unless you pass `--log-content`.
 
-Web dashboard (live logs, tasks, schedules): add to the config
+### Web dashboard
+
+A read-only page in your browser: live logs (streamed as they happen), current tasks, schedules, pairing
+requests, and the agents/routes in use. It cannot change anything.
+
+**1. Turn it on** in `kiro-crew.yaml` (it is off by default):
 ```yaml
-web_ui: {enabled: true, token: "pick-a-long-random-string"}
+web_ui:
+  enabled: true
+  host: 127.0.0.1        # this machine only (keep it this way)
+  port: 8787
+  token: "${KIRO_WEB_TOKEN:-}"   # the password for the page
 ```
-then open `http://127.0.0.1:8787/?token=pick-a-long-random-string` while `kiro-crew run` is running.
+Pick a long random token and keep it out of the file:
+```bash
+export KIRO_WEB_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+echo "$KIRO_WEB_TOKEN"            # you need it for the URL
+```
+(Or write the token directly in the file instead of `${...}`. If the token is empty the dashboard has NO password
+and logs a warning `UNAUTHENTICATED`; only do that on a machine only you use.)
+
+**2. Start the app.** The dashboard runs inside the app, so it is up whenever the app is, with either
+`uv run kiro-crew chat` or `uv run kiro-crew run`. Look for the startup line `Web UI on http://127.0.0.1:8787`.
+It stops when the app stops. Use `kiro-crew run` for an always-on dashboard.
+
+**3. Open it** in a browser on the same machine:
+```
+http://127.0.0.1:8787/?token=<your token>
+```
+The page shows a connection status, a live log list (follow mode; filter by level or text), and tasks,
+schedules and pairing requests. Wrong or missing token: the page says `unauthorised` (HTTP 401).
+For more detail in the log view, start with `-v`, or `--log AREA=debug` (section above).
+
+**4. Quick check from the terminal** (no browser needed):
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8787/api/state                       # 401 = password required
+curl -s "http://127.0.0.1:8787/api/state?token=$KIRO_WEB_TOKEN" | head -c 300                  # JSON
+curl -s "http://127.0.0.1:8787/api/logs?token=$KIRO_WEB_TOKEN"  | head -c 300                  # recent log lines
+```
+You can also send the token as a header, `X-Auth-Token: <token>`, which keeps it out of URLs and shell history.
+
+**Using it from another computer.** Do not change `host` to `0.0.0.0`: the page carries conversation
+metadata and the token travels in plain HTTP. Use an SSH tunnel instead:
+```bash
+ssh -L 8787:127.0.0.1:8787 user@the-server       # then open http://127.0.0.1:8787/?token=... locally
+```
+
+**What the logs show.** Message text and tool arguments are hidden and secrets are masked, also in the
+dashboard, unless you passed `--log-content`. Tokens in the URL are never written to logs.
+
+Dashboard problems: see the troubleshooting table below (port busy, 401, blank page).
 
 ## 8. Troubleshooting
 
@@ -256,6 +302,8 @@ then open `http://127.0.0.1:8787/?token=pick-a-long-random-string` while `kiro-c
 | Errors about AWS / credentials / model access | You are on the Bedrock default. Switch `models.default`, or run `aws login` and enable the model in your region. Also check the `coder` agent's `model:` line. |
 | `check` reports a config error | Read the message; it names the field. |
 | Bot ignores you on Discord/Slack/etc. | Your id is not in `allow_from`. Run with `-v` and look for the unauthorised-sender line. |
+| Dashboard says `unauthorised` / 401 | Token in the URL does not match `web_ui.token`; check `echo $KIRO_WEB_TOKEN` in the same shell that started the app. |
+| Dashboard page does not load | `web_ui.enabled` is false, the app is not running, or the port is in use (change `web_ui.port`). Look for `Web UI on http://...` in the startup output. |
 | Reminder never arrived | The process was not running. Use `kiro-crew run` for always-on. |
 | "Nothing is waiting for approval" | The approval timed out, or you typed it before the request appeared. |
 | Code tools refuse to run | Docker is not running (by design). Start Docker. |
