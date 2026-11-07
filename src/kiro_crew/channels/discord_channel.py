@@ -18,6 +18,21 @@ from . import Channel, MessageHandler, channel_registry
 logger = logging.getLogger(__name__)
 
 
+def discord_inbound(m: Any, me: Any) -> InboundMessage | None:
+    """discord.Message -> InboundMessage, or None to ignore. DMs always; server channels only when mentioned."""
+    if me is None or m.author.bot or m.author == me:  # not logged in yet, or our own / another bot's message
+        return None
+    is_dm = m.guild is None
+    if not is_dm and me not in m.mentions:
+        return None
+    uid = me.id
+    text = m.content.replace(f"<@{uid}>", "").replace(f"<@!{uid}>", "").strip()
+    if not text:
+        return None
+    return InboundMessage(Address("discord", str(m.channel.id)), str(m.author.id), text,
+                          m.author.display_name, raw=m, is_group=not is_dm)
+
+
 @channel_registry.register("discord")
 class DiscordChannel(Channel):
     max_len = 1900  # hard cap is 2000
@@ -40,18 +55,8 @@ class DiscordChannel(Channel):
 
         @self.client.event
         async def on_message(m: discord.Message) -> None:  # discord.py dispatches by this exact name
-            me = self.client.user
-            if me is None or m.author.bot or m.author == me:  # not logged in yet, or our own / another bot's message
-                return
-            is_dm = m.guild is None
-            if not is_dm and me not in m.mentions:
-                return
-            uid = me.id
-            text = m.content.replace(f"<@{uid}>", "").replace(f"<@!{uid}>", "").strip()
-            if not text:
-                return
-            await handler(InboundMessage(Address("discord", str(m.channel.id)), str(m.author.id), text,
-                                         m.author.display_name, raw=m, is_group=not is_dm))
+            if (msg := discord_inbound(m, self.client.user)) is not None:
+                await handler(msg)
 
         self._task = asyncio.create_task(self.client.start(token), name="discord")
 

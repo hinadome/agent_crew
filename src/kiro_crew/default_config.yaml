@@ -68,6 +68,9 @@ tasks:
   ask_user: true
   ask_timeout_s: 1800
   max_questions: 3                # per task
+  # A task can split independent work into parallel sub-tasks (start_subtask + wait_for_subtasks). The parent waits
+  # without holding a worker and continues with their results. One level only. 0 turns it off.
+  max_subtasks: 5
 
 # ---- Guard rails against runaway agents (0 disables a limit; counted per chat turn / per task run) ----
 # Past a limit the tool call is cancelled and the model is told why (so it can change course or wrap up). If it keeps
@@ -77,6 +80,10 @@ limits:
   task_tool_calls: 200
   repeat_limit: 3                 # identical tool + arguments this many times in a row is treated as a stuck loop
   grace_calls: 3                  # blocked calls tolerated before the run is stopped
+  # Token budgets (input + output as reported by the provider). 0 = off. Past the budget tools are refused and the
+  # agent must wrap up; at 125% the run is stopped. Pick values for your model and prices, e.g. task_tokens: 2000000.
+  chat_tokens: 0                  # per chat turn
+  task_tokens: 0                  # per task, over all its attempts, fix rounds and resumes
 
 # ---- Scheduler: reminders and recurring jobs the agent creates ("remind me at 9", "every morning...") ----
 scheduler:

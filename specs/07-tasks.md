@@ -11,7 +11,7 @@ progress, retries and a result delivered to where the request came from.
 |---|---|
 | `id` | 8-hex id |
 | `title`, `goal` | label and self-contained instructions |
-| `status` | `queued` · `running` · `succeeded` · `failed` · `cancelled` |
+| `status` | `queued` · `running` · `waiting` · `succeeded` · `failed` · `cancelled` (`waiting`: paused for the user or for its sub-tasks, see [spec 21](21-autonomy.md)) |
 | `agent` | agent name that created it (used to run it) |
 | `channel`, `conversation_id`, `thread_id` | origin address for notifications (nullable) |
 | `user_id` | owner (memory/identity key) |
@@ -20,6 +20,7 @@ progress, retries and a result delivered to where the request came from.
 | `result`, `error` | final text / last error |
 | `not_before` | earliest time a queued task may be claimed (backoff) |
 | `quiet_token` | if the result starts with this (case-insensitive), the task succeeds but **nothing is delivered** (used by heartbeat) |
+| `done_when`, `question`, `question_default`, `answer`, `ask_deadline`, `asks`, `wait_kind`, `plan`, `notes`, `parent_id`, `tokens` | autonomy features, see [spec 21](21-autonomy.md) |
 | `created_at`, `updated_at` | epoch seconds |
 
 The task's agent session id is `task-<id>`.
@@ -45,9 +46,10 @@ queued ──claim──▶ running ──ok──▶ succeeded
 - **TSK-6** On `start()`, `recover_interrupted()` sets every `running` task back to `queued`.
 - **TSK-7** Each attempt builds a fresh agent via the factory with `session_id = task-<id>`, the task's
   origin and owner, the `TASK_PROMPT` appended to the system prompt, and an extra `report_progress` tool.
-  The task agent is not given the `tasks` tool, so tasks cannot spawn tasks.
-- **TSK-8** First attempt prompt: `Task: <title>\n\nGoal:\n<goal>`. Later attempts (after a failure or
-  restart): an instruction to review prior work in the conversation and continue, plus the last 10 progress notes.
+  The task agent is not given the `tasks` tool, so tasks cannot spawn tasks through it; controlled one-level sub-tasks exist instead
+  (spec 21). Task agents also get `ask_user`, `update_plan`, `mark_step`, `save_note`.
+- **TSK-8** First attempt prompt: `Task: <title>\n\nGoal:\n<goal>` (+ criteria). Later attempts depend on why the last one ended:
+  error (error text, change approach), timeout (be efficient, partial result), restart (continue), answer or sub-task results. Spec 21 §4.
   Because the session is persisted, the agent resumes from its own history.
 - **TSK-9** Each attempt is bounded by `task_timeout_s` (`asyncio.wait_for`). A timeout is treated as an
   error (`timed out after <n>s`) and follows the retry rules.

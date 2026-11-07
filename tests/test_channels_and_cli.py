@@ -266,3 +266,46 @@ def test_task_cli_lists_and_answers_a_waiting_task(cli_cfg, capsys):
     got = ctx.tasks.get(t.id)
     ctx.storage.close()
     assert got.status == "queued" and got.answer == "12-15 December"
+
+
+# ---- init --provider -------------------------------------------------------------------------------
+@pytest.mark.parametrize("provider,profile,ptype", [
+    ("bedrock", "claude", "bedrock"), ("openai", "gpt", "openai"), ("anthropic", "claude-direct", "anthropic"),
+    ("ollama", "local", "ollama"), ("litellm", "gemini", "litellm")])
+def test_init_provider_sets_the_default_for_lead_and_coder(tmp_path, monkeypatch, provider, profile, ptype):
+    from kiro_crew.core.config import load_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    main(["init", "--provider", provider])
+    cfg = load_config(str(tmp_path / "kiro-crew.yaml"))
+    assert cfg.models.default == profile and cfg.models.profiles[profile].provider == ptype
+    assert cfg.agents["coder"].model == profile  # the sample pins coder; it must follow the choice
+
+
+def test_init_openai_with_own_url_and_model(tmp_path, monkeypatch):
+    from kiro_crew.core.config import load_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "not-needed")
+    main(["init", "--provider", "openai", "--base-url", "https://llm.example.com/v1", "--model-id", "my-model"])
+    p = load_config(str(tmp_path / "kiro-crew.yaml")).models.profiles["gpt"]
+    assert p.model_id == "my-model" and p.client["base_url"] == "https://llm.example.com/v1"
+    assert p.client["api_key"] == "not-needed"
+    other = load_config(str(tmp_path / "kiro-crew.yaml")).models.profiles["haiku"]
+    assert other.model_id != "my-model"  # only the chosen profile changed
+
+
+def test_init_ollama_host_and_bad_combinations(tmp_path, monkeypatch, capsys):
+    from kiro_crew.core.config import load_config
+
+    monkeypatch.chdir(tmp_path)
+    main(["init", "--provider", "ollama", "--base-url", "http://gpu-box:11434", "--model-id", "qwen2.5"])
+    p = load_config(str(tmp_path / "kiro-crew.yaml")).models.profiles["local"]
+    assert p.client["host"] == "http://gpu-box:11434" and p.model_id == "qwen2.5"
+    (tmp_path / "kiro-crew.yaml").unlink()
+    with pytest.raises(SystemExit):
+        main(["init", "--provider", "bedrock", "--base-url", "http://x"])
+    assert not (tmp_path / "kiro-crew.yaml").exists()  # nothing half-written

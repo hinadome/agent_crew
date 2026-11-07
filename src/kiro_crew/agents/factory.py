@@ -20,6 +20,8 @@ from ..core.context import AppContext
 from ..core.types import Address
 from ..memory.factory import make_store
 from ..security.approval import ApprovalHook
+from ..tasks.state import TaskStateHook, task_state_tools
+from ..tasks.subtasks import subtask_tools
 from ..tasks.tools import ask_user_tool, report_progress_tool
 from ..tools import resolve_tools
 from .budget import BudgetHook
@@ -57,6 +59,10 @@ class AgentFactory:
             tools.append(report_progress_tool(self.ctx, task_id))
             if self.cfg.tasks.ask_user:
                 tools.append(ask_user_tool(self.ctx, task_id))
+            tools += task_state_tools(self.ctx, task_id)
+            parent = self.ctx.tasks.get(task_id)
+            if self.cfg.tasks.max_subtasks > 0 and parent is not None and parent.parent_id is None:  # one level only
+                tools += subtask_tools(self.ctx, task_id)
 
         owner_context = self.ctx.workspace.system_context(soul=acfg.use_soul, core_memory=acfg.use_core_memory)
         prompt = "\n\n".join(p for p in (acfg.system_prompt, owner_context, extra_prompt) if p)
@@ -74,7 +80,7 @@ class AgentFactory:
             memory_manager=self._memory_manager(user_id, name, extract=persistent and _depth == 0),
             session_manager=(RepositorySessionManager(session_id=session_id, session_repository=self.repo)
                              if session_id is not None else None),
-            hooks=self._hooks(acfg, task_id),
+            hooks=self._hooks(acfg, task_id) + ([TaskStateHook(self.ctx, task_id, prompt)] if task_id else []),
             callback_handler=None,
         )
         # Set after construction so a restored session can never override routing info.
@@ -113,8 +119,11 @@ class AgentFactory:
         manager = self.ctx.services.get("approvals")
         lim = self.cfg.limits
         hooks: list[Any] = [TraceHook()]  # DEBUG-level tracing of tool/model/message activity
+        task = self.ctx.tasks.get(task_id) if task_id else None
         hooks.append(BudgetHook(lim.task_tool_calls if task_id else lim.chat_tool_calls, lim.repeat_limit,
-                                lim.grace_calls, per_invocation=task_id is None))
+                                lim.grace_calls, per_invocation=task_id is None,
+                                max_tokens=lim.task_tokens if task_id else lim.chat_tokens,
+                                prior_tokens=task.tokens if task else 0))
         if acfg.require_approval and manager is not None:
             hooks.append(ApprovalHook(manager, set(acfg.require_approval)))
         return hooks

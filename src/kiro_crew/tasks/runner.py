@@ -16,11 +16,12 @@ from collections.abc import Awaitable, Callable
 
 from strands import Agent
 
-from ..agents.budget import find_budget_error
+from ..agents.budget import find_budget_error, find_pause, tokens_used
 from ..core.context import AppContext
 from ..core.logging import end_turn, start_turn
 from ..core.types import Address
 from . import store as S
+from .subtasks import results_text
 from .verify import verify
 
 logger = logging.getLogger(__name__)
@@ -28,8 +29,11 @@ logger = logging.getLogger(__name__)
 Notify = Callable[[Address, str], Awaitable[None]]
 
 TASK_PROMPT = (
-    "You are executing a long-running background task autonomously. Work step by step, use tools, and call "
-    "`report_progress` after each meaningful milestone (it is saved, so work can resume if interrupted). "
+    "You are executing a long-running background task autonomously. For multi-step work, first write a plan with "
+    "`update_plan`, keep it current with `mark_step`, and store findings you will need later with `save_note`. The "
+    "plan and notes are saved and shown to you in <task_state> on every step, also after an interruption or when "
+    "old messages are summarised. Call `report_progress` after each meaningful milestone. If the work splits into "
+    "independent parts and `start_subtask` is available, start one sub-task per part, then call `wait_for_subtasks`. "
     "{ask}When finished, reply with the final deliverable only. If completion criteria are given, your result "
     "will be checked against them: make sure each one is visibly satisfied in your final reply."
 )
@@ -78,13 +82,27 @@ class TaskRunner:
         ok = self.store.cancel(task_id)
         if (t := self._running.get(task_id)) is not None:
             t.cancel()
+        for child in self.store.children(task_id):  # cancelling a parent cancels its unfinished sub-tasks
+            if child.status in S.ACTIVE:
+                self.cancel(child.id)
         return ok
+
+    def _resume_parents(self) -> int:
+        """Hand finished sub-task results to parents waiting on them (also catches up after a restart)."""
+        n = 0
+        for pid in self.store.ready_parents():
+            if self.store.answer(pid, results_text(self.store.children(pid)), kind="subtasks"):
+                self.store.add_progress(pid, "all sub-tasks finished")
+                n += 1
+        return n
 
     async def _loop(self, idx: int) -> None:
         while not self._stopping:
             try:
                 if self.store.expire_questions():
                     logger.info("Unanswered question(s) timed out; tasks continue with their stated defaults")
+                if self._resume_parents():
+                    logger.info("Resuming task(s) whose sub-tasks have finished")
                 task = self.store.claim_next()
                 if task is None:
                     self._wake.clear()
@@ -117,13 +135,23 @@ class TaskRunner:
             await self._run_inner(task)
         finally:
             end_turn(token)
+            if task.parent_id:
+                self.wake()  # let a worker hand the results to the parent if this was the last sub-task
 
     async def _run_inner(self, task: S.Task) -> None:
+        holder: dict[str, Agent] = {}
+        try:
+            await self._attempt(task, holder)
+        finally:  # every exit (done, parked, failed, cancelled): count what this attempt's agent spent
+            if (agent := holder.get("agent")) is not None:
+                self.store.add_tokens(task.id, tokens_used(agent))
+
+    async def _attempt(self, task: S.Task, holder: dict[str, Agent]) -> None:
         logger.info("Task %s attempt %d: %s", task.id, task.attempts, task.title)
         try:
             factory = self.ctx.services["agent_factory"]
             ask = ASK_ALLOWED if self.cfg.ask_user and task.address else ASK_FORBIDDEN
-            agent = factory.create(task.agent or self.cfg.agent, session_id=task.session_id, origin=task.address,
+            agent = holder["agent"] = factory.create(task.agent or self.cfg.agent, session_id=task.session_id, origin=task.address,
                                    user_id=task.user_id or "task", extra_prompt=TASK_PROMPT.format(ask=ask),
                                    task_id=task.id)
             prompt = self._prompt(task)
@@ -144,6 +172,9 @@ class TaskRunner:
                 await self._tell(task, f"Task [{task.id}] cancelled.")
             raise
         except Exception as e:
+            if find_pause(e) is not None and self._parked(task):  # kept working after asking: just park it
+                logger.info("Task %s is waiting for the user's answer (agent was cut off)", task.id)
+                return
             if (stop := find_budget_error(e)) is not None:  # retrying would only burn the same budget again
                 logger.warning("Task %s stopped: %s", task.id, stop)
                 self.store.finish(task.id, S.FAILED, error=str(stop))
@@ -163,6 +194,10 @@ class TaskRunner:
         """What to tell the agent for this attempt: first run, answer to its question, or a retry."""
         criteria = (f"\n\nCompletion criteria (your result will be checked against these):\n{task.done_when}"
                     if task.done_when else "")
+        if task.answer is not None and task.wait_kind == "subtasks":
+            return (f"Your sub-tasks have finished. Their results:\n\n{task.answer}\n\n"
+                    f"Continue the task: combine these results, redo or cover anything that failed, and finish.\n"
+                    f"Goal: {task.goal}{criteria}")
         if task.answer is not None:  # resuming after ask_user: the question is in the saved conversation
             return (f"The user's answer to your question ({task.question}):\n{task.answer}\n\n"
                     f"Continue the task to completion.\nGoal: {task.goal}{criteria}")

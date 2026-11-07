@@ -22,7 +22,7 @@ Start with Levels 0, 1, 2 and 4. They need no API key.
 cd kiro_crew
 uv sync --all-extras
 uv run ruff check src tests      # expect: All checks passed!
-uv run mypy                      # expect: Success: no issues found in 55 source files
+uv run mypy                      # expect: Success: no issues found in 59 source files
 ```
 
 ## Level 1 - Hermetic suite
@@ -30,13 +30,15 @@ uv run mypy                      # expect: Success: no issues found in 55 source
 ```bash
 uv run pytest -q -rs
 ```
-Expected: `439 passed, 30 deselected` (about 25 s). No network, no keys. The 30 deselected tests are the integration tests (Level 2/3).
+Expected: `493 passed, 30 deselected` (about 25 s). No network, no keys. The 30 deselected tests are the integration tests (Level 2/3).
 
 Useful variants:
 ```bash
 uv run pytest tests/test_channels_and_cli.py -q      # one file
 uv run pytest -k approval -q                         # by keyword
 uv run pytest -x -q                                  # stop at first failure
+uv run pytest tests/test_autonomy.py tests/test_task_questions.py tests/test_task_state.py tests/test_subtasks.py -q   # autonomy features
+uv run pytest tests/test_gaps.py -q                  # memory extraction, real provider builders, plugins, channel rules
 ```
 A guard test (`test_repository_contains_no_secret_shaped_strings`) fails if any file in the repo contains something shaped like a real key. This protects `git push` from GitHub push protection.
 
@@ -68,6 +70,14 @@ export KIRO_IT_PROVIDER=openai KIRO_IT_MODEL_ID=gpt-4o-mini KIRO_IT_API_KEY=... 
 uv run pytest -m integration -q -rs
 ```
 Pass criteria: the tests for the variables you set pass; the others show `SKIPPED` with the missing variable named.
+
+Config generator check:
+```bash
+cd "$(mktemp -d)" && OPENAI_API_KEY=x uv run --project /path/to/kiro_crew kiro-crew init --provider openai \
+  --base-url https://llm.example.com/v1 --model-id my-model && OPENAI_API_KEY=x uv run --project /path/to/kiro_crew kiro-crew check
+```
+Expect `Wrote kiro-crew.yaml (default LLM: openai)`, then `config OK`; the file has `default: gpt`, the URL and model on the `gpt`
+profile, and `model: gpt` on the `coder` agent.
 
 ## Level 4 - Keyless smoke test with a mock LLM
 
@@ -120,6 +130,11 @@ Tasks live in the DB and resume after a restart.
 Completion criteria (hermetic tests cover the verifier; the mock LLM cannot judge): `[[tool:start_task:{"title":"demo job","goal":"say done","done_when":"says done"}]]` stores the criteria; with the mock as reviewer the result is delivered with `(Completion could not be verified.)` because the mock never returns the required JSON. Guard rails: `uv run pytest tests/test_autonomy.py -q` (26 tests: stuck loops, budgets, verification). With a real LLM [NOT RUN], give a task a criterion it cannot meet and expect two fix rounds, then a `WARNING - not confirmed complete` message.
 
 Asking questions: covered by `uv run pytest tests/test_task_questions.py -q` (waiting without holding the worker, `/answer`, timeout default, owner-only, cancel, limits, retry prompts). The mock LLM cannot drive this manually, because its tool-marker syntax cannot nest a marker inside `start_task`'s arguments. With a real LLM [NOT RUN]: ask for something deliberately ambiguous as a background task; expect `Task [id] needs your input: ...`, `/tasks` showing `WAITING ... asks:`, then `/answer <id> <text>` -> `Thanks, the task continues.` and later `Task [id] done`. From a second terminal: `$K task list`, `$K task answer <id> <text>` (resumes within ~5 s). Set `tasks.ask_timeout_s: 20` to watch the timeout default.
+
+Plans, sub-tasks and token budgets are covered by the hermetic suite (above). With a real LLM [NOT RUN]: give a multi-part goal
+("compare Lisbon, Porto and Madrid for a weekend trip, one section each"). Expect `/tasks` to show `plan x/y` and, if it fans out,
+three sub-tasks marked `sub-task of <id>`, then one final message from the parent. Set `limits.task_tokens: 20000` and repeat to see a
+budget stop.
 
 ### 5.4 Reminders and schedules (verified)
 ```

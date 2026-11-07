@@ -7,6 +7,7 @@ from typing import Any
 
 from strands import ToolContext, tool
 
+from ..agents.budget import PAUSED_KEY
 from ..core.context import AppContext
 from ..core.types import Address
 from ..tools import tool_factories
@@ -52,7 +53,9 @@ def _tasks(ctx: AppContext) -> Any:
         t = ctx.tasks.get(task_id)
         if not t:
             return "No such task."
-        return f"{t.summary()}\nProgress:\n" + "\n".join(t.progress[-10:]) + (f"\nResult:\n{t.result}" if t.result else "")
+        plan = "\n".join(f"{i}. [{p['status']}] {p['step']}" for i, p in enumerate(t.plan, 1))
+        return (f"{t.summary()}\n" + (f"Plan:\n{plan}\n" if plan else "") + "Progress:\n" + "\n".join(t.progress[-10:])
+                + (f"\nResult:\n{t.result}" if t.result else ""))
 
     @tool
     def cancel_task(task_id: str) -> str:
@@ -71,8 +74,8 @@ def _tasks(ctx: AppContext) -> Any:
 def ask_user_tool(ctx: AppContext, task_id: str) -> Any:
     """Per-task tool: pause the task and ask the user a question (answered with /answer <id> <text>)."""
 
-    @tool
-    async def ask_user(question: str, default_assumption: str) -> str:
+    @tool(context=True)
+    async def ask_user(question: str, default_assumption: str, tool_context: ToolContext) -> str:
         """Ask the user ONE question and pause this task until they answer. Use it only when a wrong guess would
         waste significant work (a missing choice, a conflicting requirement), never for details you can reasonably
         assume. After calling it, reply with one short line and stop; the task resumes with the answer.
@@ -91,6 +94,7 @@ def ask_user_tool(ctx: AppContext, task_id: str) -> Any:
         deadline = time.time() + cfg.ask_timeout_s
         if not ctx.tasks.ask(task_id, question.strip(), default_assumption.strip(), deadline):
             return "Could not pause the task; decide yourself and continue."
+        tool_context.agent.state.set(PAUSED_KEY, True)  # BudgetHook now blocks every further tool call
         mins = max(1, cfg.ask_timeout_s // 60)
         if (runner := ctx.services.get("task_runner")):
             await runner.tell(task, f"Task [{task_id}] needs your input: {question.strip()}\n"

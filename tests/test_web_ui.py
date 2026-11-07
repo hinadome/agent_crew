@@ -129,3 +129,35 @@ async def test_state_api_describes_every_agent_for_the_dashboard(web_app):
     assert rows["main"]["delegates"] == ["helper"] and rows["helper"]["delegate_of"] == ["main"]
     assert st["routes"] == [{"agent": "helper", "channel": "fake", "group": True}]
     assert "system_prompt" not in json.dumps(st["agent_details"])  # prompts are never exposed by the dashboard
+
+
+async def test_logs_api_survives_records_with_non_json_fields(web_app):
+    """Regression: a third-party log record carrying an arbitrary object made /api/logs return 500."""
+
+    class Opaque:
+        def __str__(self) -> str:
+            return "<opaque thing>"
+
+    logging.getLogger("kiro_crew.gateway").warning("odd record", extra={"thing": Opaque(), "nested": {"o": object()}})
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{web_app._base}/api/logs?token=secret")
+    assert r.status_code == 200
+    ev = next(e for e in r.json() if e["message"] == "odd record")
+    assert ev["fields"]["thing"] == "<opaque thing>" and isinstance(ev["fields"]["nested"]["o"], str)
+
+
+async def test_state_api_shows_waiting_plan_subtask_and_tokens(web_app):
+    ts = web_app.ctx.tasks
+    t = ts.create("Trip", "g", agent=None, address=None, user_id="u")
+    ts.claim_next()
+    ts.ask(t.id, "Which dates?", "d", 9e9)
+    ts.set_plan(t.id, [{"step": "a", "status": "done", "note": ""}])
+    ts.add_tokens(t.id, 1234)
+    kid = ts.create("Kid", "g", agent=None, address=None, user_id="u", parent_id=t.id)
+    async with httpx.AsyncClient() as c:
+        st = (await c.get(f"{web_app._base}/api/state?token=secret")).json()
+        page = (await c.get(f"{web_app._base}/?token=secret")).text
+    v = {x["id"]: x for x in st["tasks"]}
+    assert v[t.id]["status"] == "waiting" and v[t.id]["question"] == "Which dates?" and v[t.id]["wait_kind"] == "user"
+    assert v[t.id]["plan"][0]["step"] == "a" and v[t.id]["tokens"] == 1234 and v[kid.id]["parent_id"] == t.id
+    assert "waiting for its sub-tasks" in page and "/answer" in page  # the page knows how to show them

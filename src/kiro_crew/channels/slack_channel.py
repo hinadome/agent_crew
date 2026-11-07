@@ -21,6 +21,19 @@ logger = logging.getLogger(__name__)
 _MENTION = re.compile(r"<@[UW][A-Z0-9]+>")
 
 
+def slack_inbound(event: dict[str, Any]) -> InboundMessage | None:
+    """Slack event -> InboundMessage, or None to ignore (bots, edits/joins, empty text after removing mentions)."""
+    if event.get("bot_id") or event.get("subtype"):
+        return None
+    text = _MENTION.sub("", event.get("text", "")).strip()
+    if not text:
+        return None
+    is_dm = event.get("channel_type") == "im"
+    # Channel messages: thread under the triggering message. DMs: flat conversation.
+    thread = None if is_dm else (event.get("thread_ts") or event["ts"])
+    return InboundMessage(Address("slack", event["channel"], thread), event["user"], text, raw=event, is_group=not is_dm)
+
+
 @channel_registry.register("slack")
 class SlackChannel(Channel):
     max_len = 3500
@@ -39,16 +52,8 @@ class SlackChannel(Channel):
         self.app = AsyncApp(token=self.extra["bot_token"])
         self._socket = AsyncSocketModeHandler(self.app, self.extra["app_token"])
         async def process(event: dict[str, Any]) -> None:
-            if event.get("bot_id") or event.get("subtype"):
-                return
-            text = _MENTION.sub("", event.get("text", "")).strip()
-            if not text:
-                return
-            is_dm = event.get("channel_type") == "im"
-            # Channel messages: thread under the triggering message. DMs: flat conversation.
-            thread = None if is_dm else (event.get("thread_ts") or event["ts"])
-            await handler(InboundMessage(Address("slack", event["channel"], thread), event["user"], text,
-                                         raw=event, is_group=not is_dm))
+            if (msg := slack_inbound(event)) is not None:
+                await handler(msg)
 
         @self.app.event("message")
         async def on_dm(event: dict[str, Any]) -> None:

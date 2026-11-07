@@ -218,6 +218,7 @@ class TasksConfig(_Cfg):
     ask_user: bool = True  # a running task may pause and ask the user a question (/answer ID text)
     ask_timeout_s: int = 1800  # unanswered: the task continues with the default assumption it stated
     max_questions: int = 3  # per task
+    max_subtasks: int = 5  # sub-tasks one task may start (0 = feature off). Sub-tasks cannot start their own.
 
 
 class LimitsConfig(_Cfg):
@@ -226,6 +227,10 @@ class LimitsConfig(_Cfg):
     task_tool_calls: int = 200
     repeat_limit: int = 3  # the same tool with identical arguments this many times in a row is blocked
     grace_calls: int = 3  # blocked calls tolerated before the run is stopped hard
+    # Token budgets (input + output, as reported by the provider). Off by default: sensible values depend on your
+    # model's context size and prices. Past the budget tools are refused; at 125% the run is stopped.
+    chat_tokens: int = 0  # per chat turn
+    task_tokens: int = 0  # per task, summed over all its attempts, fix rounds and resumes
 
 
 class Config(_Cfg):

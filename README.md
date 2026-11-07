@@ -11,7 +11,9 @@ specialist agents, and runs long jobs in the background without blocking the cha
 - **Long-running tasks:** durable queue, resumable sessions, retries, timeouts, cancel, progress. Tasks can declare
   completion criteria (`done_when`); the result is **verified** and the agent is sent back to fix gaps.
 - **Asks when blocked:** a running task can pause and ask you one question (`/answer <id> <text>`); it frees its worker, survives restarts, and continues with its stated default if you do not answer. Failed attempts are retried with the error in the prompt.
-- **Guard rails for autonomy:** per-run tool-call budget and stuck-loop detection (steer first, then stop).
+- **Plans and parallel work:** task agents keep a plan and notes that survive interruptions and summarisation, and can split
+  independent work into parallel sub-tasks.
+- **Guard rails for autonomy:** per-run tool-call budget, stuck-loop detection and optional token budgets (steer first, then stop).
 - **Acts on its own:** reminders, recurring jobs and cron schedules, plus an optional **heartbeat** that only
   speaks when something needs you.
 - **Crew you can grow in seconds:** add an agent by dropping a markdown file (or `kiro-crew agent add`); a running bot picks
@@ -28,7 +30,7 @@ specialist agents, and runs long jobs in the background without blocking the cha
 - **Pluggable storage:** sessions, tasks, schedules and pairing sit behind protocols; `sqlite` (default) and `memory`
   backends ship, with one behavioural contract suite both pass.
 - **Safe to turn on logging:** message text and tool arguments are hidden by default and secrets are always masked.
-- **Tested:** 390 hermetic tests (fake LLM, no network/keys/Docker), 30 opt-in integration tests against real
+- **Tested:** 493 hermetic tests (fake LLM, no network/keys/Docker), 30 opt-in integration tests against real
   infrastructure, mypy-clean source, CI workflow included.
 
 > Status: the hermetic suite runs everything against a scripted fake LLM and fake channels. Real HTTPS/TLS fetching
@@ -43,7 +45,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync --all-extras          # or: uv sync   (core only; add extras per channel)
-uv run kiro-crew init         # writes ./kiro-crew.yaml
+uv run kiro-crew init         # writes ./kiro-crew.yaml   (--provider bedrock|openai|anthropic|ollama|litellm)
 uv run kiro-crew check        # validates config, lists registered plugins
 uv run kiro-crew chat         # local terminal chat (no accounts needed)
 uv run kiro-crew run          # start every channel with enabled: true
@@ -55,12 +57,15 @@ Admin commands (work on the database directly, even while the bot runs):
 uv run kiro-crew pairing list|approve <CODE>|revoke <channel> <sender>
 uv run kiro-crew memory [--user OWNER] list|search <q>|forget <id>|clear --yes|reindex
 uv run kiro-crew schedule list|cancel <id>
+uv run kiro-crew task list|answer <id> <text>                    # background tasks; answer a waiting task
 uv run kiro-crew agent list|show|add|validate|remove|reload      # manage agents (see "Agents" below)
 uv run kiro-crew prune        # delete old sessions / finished tasks now
 ```
 
-The default config uses Amazon Bedrock. Authenticate first (`aws login`, or standard AWS credentials),
-or point `models.default` at another profile such as `gpt`, `claude-direct`, or `local` (Ollama).
+`init` uses Amazon Bedrock unless you pass `--provider`. For example
+`kiro-crew init --provider openai --base-url https://llm.example.com/v1 --model-id my-model` for any OpenAI-compatible server, or
+`--provider ollama` for a local model. It sets the default for every agent, including the sample `coder`. With Bedrock, authenticate
+first (`aws login`, or standard AWS credentials).
 
 ### Install extras
 
@@ -251,6 +256,11 @@ retrying).
 and answer with `/answer <id> <text>` (or `kiro-crew task answer <id> <text>`). While waiting it holds no worker and survives restarts;
 if you do not answer within `tasks.ask_timeout_s` (30 min) it continues with the default assumption it told you about. At most
 `tasks.max_questions` per task. A retry after an error or timeout now tells the agent what went wrong and to take a different approach.
+
+**Plans, notes and sub-tasks.** Task agents keep a plan (`update_plan`, `mark_step`) and notes (`save_note`) in the task record; both are
+shown to the model before every call, so they survive retries, restarts and summarisation (`/tasks` shows `plan 2/5`). Independent parts
+can run as parallel sub-tasks (`start_subtask`, then `wait_for_subtasks`); the parent waits without holding a worker and continues with
+their results. Optional token budgets: `limits.chat_tokens`, `limits.task_tokens` (off by default; usage is shown per task).
 Details and what is *not* covered: [specs/21-autonomy.md](specs/21-autonomy.md).
 
 ## How it fits together
@@ -339,7 +349,7 @@ src/kiro_crew/
   sandbox/          Docker / host / none command backends
   tools/            tool registry, built-in tools, web fetch/search, sandbox tools
   default_config.yaml
-tests/              390 hermetic tests (fake LLM + fake channel) + tests/integration (real infrastructure)
+tests/              493 hermetic tests (fake LLM + fake channel) + tests/integration (real infrastructure)
 specs/              detailed functional specifications
 ARCHITECTURE.md     structure, diagrams, design decisions
 .github/workflows/  CI

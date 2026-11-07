@@ -31,7 +31,7 @@ You need Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/install
 ```bash
 cd kiro_crew
 uv sync --all-extras
-uv run kiro-crew init      # writes ./kiro-crew.yaml (a sample config)
+uv run kiro-crew init --provider openai      # writes ./kiro-crew.yaml; pick: bedrock (default), openai, anthropic, ollama, litellm
 ```
 
 ## 3. Pick an LLM, then run
@@ -64,6 +64,9 @@ models:
       params: {temperature: 0.3}               # optional
 ```
 
+Or let `init` write it: `uv run kiro-crew init --provider openai --base-url https://llm.example.com/v1 --model-id my-model-name`
+(then `export OPENAI_API_KEY=...`, any value if the server has no auth).
+
 ```bash
 export MYGW_API_KEY=...
 uv run kiro-crew check
@@ -81,8 +84,8 @@ uv run kiro-crew chat
 - Verified only against a local mock server (including tool calls), not your real endpoint. If chat fails, run
   `uv run kiro-crew -v chat` and read the error line.
 
-Important: the sample config pins the `coder` agent to `model: claude` (Bedrock). If you are not using Bedrock,
-change it to your profile name (or delete that line), or `coder` will try Bedrock.
+`init --provider` sets your choice as the default for every agent, including the sample `coder` agent (which otherwise
+points at Bedrock). If you edit the file by hand instead, change `coder`'s `model:` line too.
 
 Then:
 
@@ -165,6 +168,9 @@ you get `Task [id] done: ...`.
 Check: `/tasks`; the output file appears in `~/.kiro-crew/files/db-notes.md`. Cancel with `/cancel ID`.
 Tip: tell it what "done" means, for example `... Done when the file lists at least 3 sources.` The lead agent passes this as completion criteria; when the task ends, a reviewer checks the result and sends the agent back to fix gaps (twice at most), and you get a `WARNING` if it still falls short. A stuck agent (repeating the same call, or using far too many tool calls) is stopped; see `limits:` in the config.
 If the task hits a real fork it may pause and ask: `Task [id] needs your input: Which dates?`. The task shows as `WAITING` in `/tasks` and uses no worker. Reply `/answer <id> 12-15 December` (or `uv run kiro-crew task answer <id> 12-15 December` from a shell). No reply within 30 minutes: it carries on with the default assumption it told you. It asks at most 3 times (`tasks.max_questions`; `tasks.ask_user: false` turns asking off). If an attempt fails, the retry is told what failed and to try a different approach.
+For bigger jobs the agent writes a plan and keeps notes; `/tasks` shows progress like `plan 2/5`, and the plan survives restarts. If the
+work splits into independent parts (say, one per city), it can run them as parallel sub-tasks and then combine the results;
+you only get the final message.
 The `researcher` agent needs the `web` tool (already in the sample config) to browse. Add a search key to enable
 search, not just page fetching: set `tool_options.web.search: brave` and `api_key` **(needs your account)**.
 
@@ -319,6 +325,7 @@ Dashboard problems: see the troubleshooting table below (port busy, 401, blank p
 - [ ] Code-running agents keep `require_approval` and use the Docker sandbox
 - [ ] Public-facing agents are `isolated: true` and have few tools
 - [ ] Dashboard keeps `host: 127.0.0.1` and a token
+- [ ] Optional: set `limits.task_tokens` (and `chat_tokens`) once you know what a typical task uses (`/tasks` shows tokens per task)
 
 ## 10. Where next
 

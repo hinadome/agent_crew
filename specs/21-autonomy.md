@@ -1,6 +1,7 @@
 # 21. Autonomy: completion verification and guard rails
 
-Source: `tasks/verify.py`, `tasks/runner.py` (`_work`), `tasks/tools.py` (`start_task`), `agents/budget.py`,
+Source: `tasks/verify.py`, `tasks/runner.py` (`_work`, `_prompt`, `_resume_parents`), `tasks/tools.py` (`start_task`, `ask_user`),
+`tasks/state.py`, `tasks/subtasks.py`, `agents/budget.py`,
 `agents/factory.py` (`_hooks`), `gateway.py`, `core/config.py` (`TasksConfig`, `LimitsConfig`).
 
 The inner agent loop (model -> tool calls -> model ... until a reply with no tool call) belongs to Strands. This spec covers
@@ -66,8 +67,9 @@ RUNNING --ask_user--> WAITING --/answer or timeout--> QUEUED --claim--> RUNNING 
   means nobody is asked and the model assumes its default; `tasks.ask_user: false` restores "do not ask questions".
 - Waiting tasks survive restarts (recovery only touches `running`), are protected from session pruning, show as `WAITING ... asks:
   <question>` in `/tasks`, `kiro-crew task list` and the dashboard, and can be cancelled.
-- Relies on the model obeying "stop after asking". If it keeps working anyway, the run still ends in the parked state when it returns, and the
-  work it did meanwhile is kept in the session. Further tool calls are not blocked.
+- After `ask_user` the agent is flagged as paused (`agent.state["paused_for_user"]`): `BudgetHook` cancels every further tool call
+  with "this task is paused, reply and stop", and after 3 such calls aborts the run (`TaskPaused`). The runner treats that abort as a
+  normal park, not a failure. The same applies after `wait_for_subtasks`.
 
 ## 4. Smarter retries
 
@@ -84,13 +86,57 @@ The retry prompt now depends on why the last attempt ended (`TaskRunner._prompt`
 Each error/timeout retry also adds a progress note (`attempt N: retrying after: ...`). Attempts and backoff are unchanged, and
 budget stops are still never retried. This cannot make a weak model smarter; it only stops the retry from being blind.
 
-## 5. Not covered (yet)
+## 5. Plan and notes (structured task state)
 
-Token or money budgets, parallel sub-tasks, task dependencies, structured per-task state,
-explicit plans, learning from outcomes. A tool-call cap does not bound cost per call (a single huge tool result can still be expensive).
+Task agents get `update_plan(steps)`, `mark_step(number, status, note)` and `save_note(key, value)` (`tasks/state.py`). Both live in the task
+row (`plan` JSON `[{step,status,note}]`, `notes` JSON object) and therefore survive crashes, retries and summarisation.
 
-## 6. Tests
+- `TaskStateHook` (on `BeforeModelCallEvent`) sets the agent's system prompt to *base prompt + `<task_state>`* before **every** model call,
+  read fresh from the store. The model sees the current plan even after old messages were summarised away, and a resumed attempt starts with it.
+- `update_plan` keeps the status/note of steps whose text is unchanged. Statuses: pending, doing, done, skipped, blocked; `done`/`blocked`
+  also write a progress note. Limits: 30 steps × 300 chars, 40 notes, 2000 chars each, 8000 chars in total. An empty value deletes a note.
+- Visible as `plan 2/5` in `/tasks`, `task_status` (full plan) and the dashboard. Chat agents do not get these tools or the state block.
+
+## 6. Sub-tasks
+
+Top-level task agents get `start_subtask(title, goal, done_when="")` and `wait_for_subtasks()` (`tasks/subtasks.py`), unless
+`tasks.max_subtasks` is 0.
+
+```
+parent RUNNING --start_subtask x N--> children QUEUED (parent_id = parent)
+parent --wait_for_subtasks--> WAITING (wait_kind=subtasks)          [no worker held]
+children run in parallel on free workers; no chat messages, report to the parent
+all children terminal --> parent QUEUED with their results as the answer --> resumes
+```
+
+- Children: same agent and owner as the parent, no chat address (so they never ask the user and never message the chat), own session,
+  own verification (`done_when`), budgets and retries. One level only: sub-tasks get no sub-task tools. At most `tasks.max_subtasks`
+  per parent.
+- `ready_parents()` is checked by every worker loop iteration, and a finishing child wakes the workers, so the parent resumes promptly and
+  also after a restart that happened while children finished.
+- Resume prompt: each child's id, title, status and result or error (3000 chars each), then "combine, redo or cover anything that failed,
+  and finish". Waiting for children holds no worker, so even `tasks.workers: 1` cannot deadlock.
+- `/answer` cannot release a sub-task wait and the question timeout does not apply to it (children have their own timeouts). Cancelling
+  a parent cancels its unfinished children; a cancelled or failed child is reported to the parent as such.
+
+## 7. Token budget
+
+`limits.chat_tokens` (per chat turn) and `limits.task_tokens` (per task, summed over all attempts, fix rounds, answers and sub-task
+resumes; stored in `tasks.tokens`). Both default to 0 = off, because sensible values depend on model and price.
+
+- Counted from `agent.event_loop_metrics.accumulated_usage.totalTokens` (input + output as the provider reports it). The verifier's own
+  calls and sub-tasks are not added to the parent (each sub-task has its own budget).
+- At 100 %: tool calls are cancelled with "token budget used up, reply now". Above 125 %: `BudgetExceeded` before the next model call;
+  chat users get "I had to stop", the task fails without retry.
+- Used tokens show in `/tasks` (`12.3k tokens`) and on the dashboard. No money amounts: use your provider's pricing tools for that.
+
+## 8. Not covered (yet)
+
+Money budgets, dependencies between unrelated tasks, nested sub-tasks, learning from outcomes, tool permission scopes per task.
+The token budget is checked between model calls, so one call can overshoot it.
+
+## 9. Tests
 
 `tests/test_autonomy.py`: hook rules (unit), runaway chat turn and runaway task (end to end), per-turn reset on cached agents,
 verdict parsing, fix-and-redeliver, bounded rounds with warning, inconclusive/failed reviewer, no-criteria, `verify_all`, switched off,
-`done_when` set via the tool. `tests/test_task_questions.py`: ask/wait/answer end to end with a single worker, timeout default, owner-only `/answer`, cancel while waiting, question limit, no-chat case, prompt wording, retry prompts per failure kind. Storage contract (both backends): `done_when`, ask/answer/expire/consume, attempt rollback, recovery clearing errors. CLI: `kiro-crew task list|answer`.
+`done_when` set via the tool. `tests/test_task_questions.py`: ask/wait/answer end to end with a single worker, timeout default, owner-only `/answer`, cancel while waiting, question limit, no-chat case, prompt wording, retry prompts per failure kind. Storage contract (both backends): `done_when`, ask/answer/expire/consume, attempt rollback, recovery clearing errors, plan/notes, sub-task waits and `ready_parents`, tokens. CLI: `kiro-crew task list|answer`. `tests/test_task_state.py`: plan/note tools and limits, state in the system prompt of every call and after a resume. `tests/test_subtasks.py`: one-worker fan-out end to end, parallelism with two workers, failed/cancelled children, cascade cancel, limits, one level, restart catch-up. `tests/test_autonomy.py`: token soft/hard limits, per-turn vs per-task counting, tokens recorded across attempts, paused-tool blocking.

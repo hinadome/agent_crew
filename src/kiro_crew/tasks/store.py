@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import time
 import uuid
@@ -54,6 +55,11 @@ class Task:
     answer: str | None = None
     ask_deadline: float | None = None
     asks: int = 0  # questions asked so far (capped by tasks.max_questions)
+    plan: list[dict[str, str]] = field(default_factory=list)  # [{"step", "status", "note"}], see tasks/state.py
+    notes: dict[str, str] = field(default_factory=dict)  # durable scratchpad: key -> value
+    parent_id: str | None = None  # set on sub-tasks
+    wait_kind: str | None = None  # while WAITING: "user" (a question) or "subtasks" (its children)
+    tokens: int = 0  # model tokens used by this task's agent so far, all attempts
 
     @property
     def session_id(self) -> str:
@@ -61,6 +67,15 @@ class Task:
 
     def summary(self) -> str:
         last = f" | last: {self.progress[-1]}" if self.progress else ""
+        if self.plan:
+            done = sum(1 for p in self.plan if p.get("status") in ("done", "skipped"))
+            last = f" | plan {done}/{len(self.plan)}" + last
+        if self.parent_id:
+            last = f" | sub-task of {self.parent_id}" + last
+        if self.tokens:
+            last = f" | {self.tokens / 1000:.1f}k tokens" + last
+        if self.status == WAITING and self.wait_kind == "subtasks":
+            last += " | waiting for its sub-tasks"
         if self.status == WAITING and self.question:
             last = f" | asks: {self.question}  (reply: /answer {self.id} <text>)"
         return f"[{self.id}] {self.status.upper()} - {self.title}{last}"
@@ -71,7 +86,8 @@ def _row_to_task(r: Any) -> Task:
     return Task(r["id"], r["title"], r["goal"], r["status"], r["agent"], addr, r["user_id"], r["attempts"],
                 json.loads(r["progress"]), r["result"], r["error"], r["created_at"], r["updated_at"],
                 r["quiet_token"], r["done_when"], r["question"], r["question_default"], r["answer"],
-                r["ask_deadline"], r["asks"] or 0)
+                r["ask_deadline"], r["asks"] or 0, json.loads(r["plan"] or "[]"), json.loads(r["notes"] or "{}"),
+                r["parent_id"], r["wait_kind"], r["tokens"] or 0)
 
 
 class TaskStore:
@@ -83,17 +99,20 @@ class TaskStore:
         db.ensure_column("tasks", "quiet_token", "TEXT")  # added after v0.1: upgrade older databases
         db.ensure_column("tasks", "done_when", "TEXT")
         for col, typ in (("question", "TEXT"), ("question_default", "TEXT"), ("answer", "TEXT"),
-                         ("ask_deadline", "REAL"), ("asks", "INTEGER NOT NULL DEFAULT 0")):
+                         ("ask_deadline", "REAL"), ("asks", "INTEGER NOT NULL DEFAULT 0"),
+                         ("plan", "TEXT"), ("notes", "TEXT"), ("parent_id", "TEXT"), ("wait_kind", "TEXT"),
+                         ("tokens", "INTEGER NOT NULL DEFAULT 0")):
             db.ensure_column("tasks", col, typ)
 
     def create(self, title: str, goal: str, *, agent: str | None, address: Address | None,
-               user_id: str | None, quiet_token: str | None = None, done_when: str | None = None) -> Task:
+               user_id: str | None, quiet_token: str | None = None, done_when: str | None = None,
+               parent_id: str | None = None) -> Task:
         tid, now = uuid.uuid4().hex[:8], time.time()
         self.db.execute(
             "INSERT INTO tasks(id,title,goal,status,agent,channel,conversation_id,thread_id,user_id,"
-            "created_at,updated_at,quiet_token,done_when) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at,updated_at,quiet_token,done_when,parent_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, title, goal, QUEUED, agent, address and address.channel, address and address.conversation_id,
-             address and address.thread_id, user_id, now, now, quiet_token, done_when))
+             address and address.thread_id, user_id, now, now, quiet_token, done_when, parent_id))
         return self.get(tid)  # type: ignore[return-value]
 
     def get(self, task_id: str) -> Task | None:
@@ -164,22 +183,49 @@ class TaskStore:
         """RUNNING -> WAITING with a question. The worker is released; the task survives restarts."""
         return self.db.execute(
             "UPDATE tasks SET status=?, question=?, question_default=?, answer=NULL, ask_deadline=?, "
-            "asks=asks+1, updated_at=? WHERE id=? AND status=?",
+            "asks=asks+1, wait_kind='user', updated_at=? WHERE id=? AND status=?",
             (WAITING, question, default, deadline, time.time(), task_id, RUNNING)).rowcount > 0
 
-    def answer(self, task_id: str, text: str) -> bool:
-        """WAITING -> QUEUED with the answer. The attempt counter is rolled back: an answer is not a retry."""
+    def answer(self, task_id: str, text: str, *, kind: str = "user") -> bool:
+        """WAITING -> QUEUED with the answer. The attempt counter is rolled back: an answer is not a retry.
+        ``kind`` must match what the task waits for, so /answer can never release a task waiting on sub-tasks."""
         return self.db.execute(
             "UPDATE tasks SET status=?, answer=?, not_before=0, attempts=MAX(attempts-1,0), updated_at=? "
-            "WHERE id=? AND status=?", (QUEUED, text, time.time(), task_id, WAITING)).rowcount > 0
+            "WHERE id=? AND status=? AND wait_kind=?", (QUEUED, text, time.time(), task_id, WAITING, kind)).rowcount > 0
+
+    def wait_for_children(self, task_id: str) -> bool:
+        return self.db.execute("UPDATE tasks SET status=?, wait_kind='subtasks', answer=NULL, updated_at=? "
+                               "WHERE id=? AND status=?", (WAITING, time.time(), task_id, RUNNING)).rowcount > 0
+
+    def children(self, parent_id: str) -> builtins.list[Task]:
+        return [_row_to_task(r) for r in
+                self.db.query("SELECT * FROM tasks WHERE parent_id=? ORDER BY created_at", (parent_id,))]
+
+    def ready_parents(self) -> builtins.list[str]:
+        """Parents waiting on sub-tasks that have all finished."""
+        rows = self.db.query(
+            "SELECT p.id FROM tasks p WHERE p.status=? AND p.wait_kind='subtasks' AND NOT EXISTS ("
+            "SELECT 1 FROM tasks c WHERE c.parent_id=p.id AND c.status IN ('queued','running','waiting'))", (WAITING,))
+        return [r["id"] for r in rows]
 
     def expire_questions(self) -> int:
         """Questions nobody answered in time are answered with the agent's own stated default."""
         now = time.time()
-        rows = self.db.query("SELECT id, question_default FROM tasks WHERE status=? AND ask_deadline<=?",
-                             (WAITING, now))
+        rows = self.db.query("SELECT id, question_default FROM tasks WHERE status=? AND wait_kind='user' "
+                             "AND ask_deadline<=?", (WAITING, now))
         return sum(self.answer(r["id"], timeout_answer(r["question_default"])) for r in rows)
 
+    # -- structured state (plan + notes) ------------------------------------------------------------
+    def set_plan(self, task_id: str, plan: builtins.list[dict[str, str]]) -> None:
+        self.db.execute("UPDATE tasks SET plan=?, updated_at=? WHERE id=?", (json.dumps(plan), time.time(), task_id))
+
+    def set_notes(self, task_id: str, notes: dict[str, str]) -> None:
+        self.db.execute("UPDATE tasks SET notes=?, updated_at=? WHERE id=?", (json.dumps(notes), time.time(), task_id))
+
+    def add_tokens(self, task_id: str, n: int) -> None:
+        if n > 0:
+            self.db.execute("UPDATE tasks SET tokens=tokens+? WHERE id=?", (n, task_id))
+
     def consume_answer(self, task_id: str) -> None:
-        self.db.execute("UPDATE tasks SET question=NULL, question_default=NULL, answer=NULL, ask_deadline=NULL "
-                        "WHERE id=?", (task_id,))
+        self.db.execute("UPDATE tasks SET question=NULL, question_default=NULL, answer=NULL, ask_deadline=NULL, "
+                        "wait_kind=NULL WHERE id=?", (task_id,))

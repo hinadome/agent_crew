@@ -1,6 +1,7 @@
 """A background task can pause, ask the user a question, and resume with the answer; retries explain failures."""
 
 import asyncio
+from types import SimpleNamespace
 
 from kiro_crew.app import App
 from kiro_crew.core.types import Address
@@ -109,11 +110,13 @@ async def test_question_limit_and_nobody_to_ask(tmp_path):
     await _boot(a)
     t = _task(a, "plain")
     await _status(a, t.id, "succeeded")
+    ctx_ = SimpleNamespace(agent=SimpleNamespace(state=SimpleNamespace(set=lambda k, v: None)))
     ask = ask_user_tool(a.ctx, t.id)
     a.ctx.tasks.db.execute("UPDATE tasks SET asks=1 WHERE id=?", (t.id,))
-    assert "no more are allowed" in await ask(question="q", default_assumption="d")
+    assert "no more are allowed" in await ask(question="q", default_assumption="d", tool_context=ctx_)
     nobody = _task(a, "no chat", address=None)
-    assert "nobody to ask" in await ask_user_tool(a.ctx, nobody.id)(question="q", default_assumption="use Z")
+    assert "nobody to ask" in await ask_user_tool(a.ctx, nobody.id)(
+        question="q", default_assumption="use Z", tool_context=ctx_)
     await _close(a)
 
 
@@ -180,4 +183,14 @@ async def test_failed_attempt_is_retried_with_its_error_in_the_prompt(tmp_path):
     a.runner.wake()
     assert (await _status(a, t.id, "succeeded", "failed")).status == "succeeded"
     assert "FAILED with this error" in model.prompt_text() and "model exploded" in model.prompt_text()
+    await _close(a)
+
+
+async def test_a_model_that_keeps_working_after_asking_is_cut_off_and_the_task_stays_parked(tmp_path):
+    a = _make(tmp_path)
+    await _boot(a)
+    a.ctx.models.profile("a").always_tool = ("ask_user", '{"question": "q?", "default_assumption": "d"}')
+    t = _task(a, "disobedient")
+    got = await _status(a, t.id, "waiting", "failed", "succeeded")
+    assert got.status == "waiting" and got.asks == 1  # not failed, and only one question was sent
     await _close(a)

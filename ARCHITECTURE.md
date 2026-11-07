@@ -344,6 +344,9 @@ stateDiagram-v2
     queued --> cancelled: /cancel
     running --> cancelled: /cancel
     running --> queued: process restart (recover_interrupted)
+    running --> waiting: ask_user / wait_for_subtasks (worker released)
+    waiting --> queued: /answer, question timeout, or all sub-tasks finished
+    waiting --> cancelled: /cancel
     succeeded --> [*]
     failed --> [*]
     cancelled --> [*]
@@ -372,7 +375,12 @@ sequenceDiagram
 ```
 
 Resumability comes from giving each task its own persisted Strands session. On a retry or after a
-restart the agent reloads its full history and is told to continue.
+restart the agent reloads its full history and is told to continue (or, after an error, what failed).
+
+Around this loop sit the autonomy features of [spec 21](specs/21-autonomy.md): a verifier that checks the result against `done_when`
+and sends the agent back, a plan + notes kept in the task row and re-injected into the system prompt before every model call,
+`ask_user` and sub-tasks that park the task as `waiting` without holding a worker, and a budget hook (tool calls, repeated calls,
+tokens) that steers first and stops second.
 
 ## 8. Scheduling and heartbeat
 

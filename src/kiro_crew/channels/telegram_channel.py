@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -61,7 +62,7 @@ class TelegramChannel(Channel):
                                           .lower() == username)
                         if f"@{username}" not in text.lower() and not replied_to_bot:
                             continue
-                        text = text.replace(f"@{self._me['username']}", "").strip()
+                        text = re.sub(r"[ \t]{2,}", " ", text.replace(f"@{self._me['username']}", "")).strip()
                     await handler(InboundMessage(Address("telegram", str(m["chat"]["id"])), str(m["from"]["id"]),
                                                  text, m["from"].get("first_name"), raw=m, is_group=group))
 

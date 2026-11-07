@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kiro_crew.agents.budget import BudgetExceeded, BudgetHook, find_budget_error
+from kiro_crew.agents.budget import BudgetExceeded, BudgetHook, TaskPaused, find_budget_error, find_pause
 from kiro_crew.app import App
 from kiro_crew.core.types import Address
 from kiro_crew.tasks.verify import parse_verdict
@@ -17,8 +17,19 @@ def _said(ch):
     return " ".join(" ".join(ch.out).split())
 
 
-def _call(name="current_time", **args):
-    return SimpleNamespace(tool_use={"name": name, "input": args}, cancel_tool=False)
+class _State(dict):
+    def set(self, k, v):
+        self[k] = v
+
+
+def _agent(tokens=0, paused=False):
+    return SimpleNamespace(state=_State({"paused_for_user": True} if paused else {}),
+                           event_loop_metrics=SimpleNamespace(accumulated_usage={"totalTokens": tokens}))
+
+
+def _call(name="current_time", paused=False, agent=None, **args):
+    return SimpleNamespace(tool_use={"name": name, "input": args}, cancel_tool=False,
+                           agent=agent or _agent(paused=paused))
 
 
 # ---- BudgetHook (unit) ---------------------------------------------------------------------------
@@ -62,7 +73,7 @@ def test_budget_resets_per_invocation_but_not_for_tasks():
     task = BudgetHook(max_tool_calls=1, repeat_limit=0, per_invocation=False)
     for h in (chat, task):
         h._check(_call(n=0))
-        h._begin(SimpleNamespace())
+        h._begin(SimpleNamespace(agent=None))
     e1, e2 = _call(n=1), _call(n=1)
     chat._check(e1)
     task._check(e2)
@@ -83,6 +94,78 @@ def test_find_budget_error_unwraps_chains():
     wrapper.original_exception = inner  # type: ignore[attr-defined]
     assert find_budget_error(wrapper) is inner
     assert find_budget_error(RuntimeError("plain")) is None
+
+
+def test_after_ask_user_every_tool_call_is_blocked_then_the_run_is_cut_off():
+    h = BudgetHook(max_tool_calls=0, repeat_limit=0)
+    events = [_call("web_fetch", paused=True, n=i) for i in range(3)]
+    for e in events:
+        h._check(e)
+    assert all("paused until the user answers" in e.cancel_tool for e in events)
+    with pytest.raises(TaskPaused):
+        h._check(_call("web_fetch", paused=True, n=9))
+    h.reset()
+    h._check(_call("web_fetch", paused=True, n=10))  # reset() starts a fresh count
+
+
+def test_find_pause_unwraps_chains():
+    inner = TaskPaused("x")
+    wrapper = RuntimeError("wrapped")
+    wrapper.original_exception = inner  # type: ignore[attr-defined]
+    assert find_pause(wrapper) is inner and find_pause(RuntimeError()) is None
+
+
+# ---- token budget ------------------------------------------------------------------------------------
+def test_token_budget_soft_then_hard():
+    h = BudgetHook(max_tool_calls=0, repeat_limit=0, max_tokens=1000)
+    under, over = _agent(999), _agent(1000)
+    e = _call(agent=under, n=1)
+    h._check(e)
+    assert not e.cancel_tool
+    e = _call(agent=over, n=2)
+    h._check(e)
+    assert "token budget of 1000 is used up (1000 tokens)" in e.cancel_tool and "Reply now" in e.cancel_tool
+    h._check_model(SimpleNamespace(agent=_agent(1250)))  # the wrap-up reply is still allowed
+    with pytest.raises(BudgetExceeded, match="token budget"):
+        h._check_model(SimpleNamespace(agent=_agent(1251)))
+
+
+def test_chat_token_budget_counts_only_this_turn_and_tasks_include_earlier_attempts():
+    chat = BudgetHook(max_tool_calls=0, repeat_limit=0, max_tokens=100)
+    cached = _agent(5000)  # a cached chat agent that already spent a lot in earlier turns
+    chat._begin(SimpleNamespace(agent=cached))
+    e = _call(agent=cached, n=1)
+    chat._check(e)
+    assert not e.cancel_tool and chat.used(cached) == 0
+    task = BudgetHook(max_tool_calls=0, repeat_limit=0, per_invocation=False, max_tokens=100, prior_tokens=90)
+    e = _call(agent=_agent(10), n=1)
+    task._check(e)
+    assert e.cancel_tool  # 90 earlier + 10 now = budget
+
+
+def test_token_budget_off_by_default():
+    h = BudgetHook(max_tool_calls=0, repeat_limit=0)
+    e = _call(agent=_agent(10**9), n=1)
+    h._check(e)
+    h._check_model(SimpleNamespace(agent=_agent(10**9)))
+    assert not e.cancel_tool
+
+
+async def test_task_tokens_are_recorded_across_attempts_and_cap_the_task(tmp_path):
+    a = App(make_config(tmp_path, tasks={"workers": 1, "max_attempts": 1}, limits={"task_tokens": 5}))
+    await a.gateway.start()
+    a.runner.start()
+    ok = a.ctx.tasks.create("small", "g", agent=None, address=None, user_id="u")
+    await wait_for(lambda: a.ctx.tasks.get(ok.id).status == "succeeded")
+    assert a.ctx.tasks.get(ok.id).tokens == 2  # the fake model reports 2 tokens per call
+    assert "k tokens" in a.ctx.tasks.get(ok.id).summary()
+    a.ctx.models.profile("a").always_tool = ("current_time", "{}")  # 2 tokens per call, forever
+    loop = a.ctx.tasks.create("greedy", "g", agent=None, address=Address("fake", "c1"), user_id="u")
+    await wait_for(lambda: a.ctx.tasks.get(loop.id).status in ("failed", "succeeded"))
+    got = a.ctx.tasks.get(loop.id)
+    assert got.status == "failed" and "token budget of 5" in got.error and got.tokens >= 5
+    await a.runner.stop()
+    a.ctx.db.close()
 
 
 # ---- runaway agents, end to end ---------------------------------------------------------------------

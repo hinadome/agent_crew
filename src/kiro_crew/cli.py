@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
 
@@ -167,6 +168,45 @@ def _agent_cli(args: argparse.Namespace) -> None:
         print(f"removed {path}")
 
 
+# provider -> profile name in the sample config
+INIT_PROFILES = {"bedrock": "claude", "openai": "gpt", "anthropic": "claude-direct", "ollama": "local",
+                 "litellm": "gemini"}
+INIT_HINTS = {
+    "bedrock": "Sign in to AWS (aws login) and enable the model in your Bedrock region.",
+    "openai": "Set OPENAI_API_KEY (use any value if your server has no auth).",
+    "anthropic": "Set ANTHROPIC_API_KEY.",
+    "ollama": "Run `ollama pull llama3.2` (or pass --model-id) and keep Ollama running.",
+    "litellm": "Set GEMINI_API_KEY (or edit the profile for another LiteLLM provider).",
+}
+
+
+def render_init_config(text: str, provider: str, model_id: str | None = None, base_url: str | None = None) -> str:
+    """The sample config with the chosen provider as default for the lead AND the pinned coder agent."""
+    import re
+
+    profile = INIT_PROFILES[provider]
+    if base_url and provider not in ("openai", "ollama"):
+        raise ValueError("--base-url applies to --provider openai (server URL) or ollama (host) only")
+    text = re.sub(r"(?m)^  default: claude\b", f"  default: {profile}", text, count=1)
+    text = re.sub(r"(?m)^    model: claude\b", f"    model: {profile}", text)  # the pinned coder agent
+
+    def edit_profile(block_edit: Callable[[str], str]) -> None:
+        nonlocal text
+        m = re.search(rf"(?ms)^    {re.escape(profile)}:.*?(?=^    \S|^# |\Z)", text)
+        if not m:
+            raise ValueError(f"internal error: profile {profile} not found in the sample config")
+        text = text[:m.start()] + block_edit(m.group(0)) + text[m.end():]
+
+    if model_id:
+        edit_profile(lambda b: re.sub(r"(?m)^(\s+model_id:\s*).*$", lambda mm: f"{mm.group(1)}{model_id}", b, count=1))
+    if base_url and provider == "openai":
+        edit_profile(lambda b: b.replace('client: {api_key: "${OPENAI_API_KEY}"}',
+                                         'client: {api_key: "${OPENAI_API_KEY}", base_url: "' + base_url + '"}'))
+    if base_url and provider == "ollama":
+        edit_profile(lambda b: re.sub(r'host: "[^"]*"', f'host: "{base_url}"', b))
+    return text
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="kiro-crew", description=__doc__)
     p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG), help="path to YAML config")
@@ -179,7 +219,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--log-content", action="store_true",
                    help="include message text, tool arguments/results and commands in logs (hidden by default)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init", help="write a starter kiro-crew.yaml here")
+    ini = sub.add_parser("init", help="write a starter kiro-crew.yaml here")
+    ini.add_argument("--provider", choices=sorted(INIT_PROFILES), default="bedrock",
+                     help="which LLM the starter config uses by default (default: bedrock)")
+    ini.add_argument("--model-id", help="model name for that provider (default: the sample's)")
+    ini.add_argument("--base-url", help="openai: URL of an OpenAI-compatible server; ollama: the Ollama host")
     run = sub.add_parser("run", help="start all enabled channels + task workers")
     run.add_argument("--only", nargs="*", help="only start these channels (e.g. --only cli)")
     sub.add_parser("chat", help="shortcut for: run --only cli")
@@ -246,8 +290,14 @@ def main(argv: list[str] | None = None) -> None:
         dest = Path(args.config)
         if dest.exists():
             sys.exit(f"{dest} already exists")
-        dest.write_text((resources.files("kiro_crew") / "default_config.yaml").read_text())
-        print(f"Wrote {dest}. Edit it, then run: kiro-crew chat")
+        try:
+            text = render_init_config((resources.files("kiro_crew") / "default_config.yaml").read_text(),
+                                      args.provider, args.model_id, args.base_url)
+        except ValueError as e:
+            sys.exit(str(e))
+        dest.write_text(text)
+        print(f"Wrote {dest} (default LLM: {args.provider}). {INIT_HINTS[args.provider]}")
+        print("Then run: kiro-crew check   and   kiro-crew chat")
         return
 
     if args.cmd == "agent":

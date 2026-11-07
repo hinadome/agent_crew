@@ -124,7 +124,8 @@ class WebUI:
 def _task_view(t: Any) -> dict[str, Any]:
     return {"id": t.id, "title": t.title, "status": t.status, "attempts": t.attempts,
             "user_id": t.user_id, "progress": t.progress[-3:], "updated_at": t.updated_at,
-            "question": t.question}
+            "question": t.question, "wait_kind": t.wait_kind, "plan": t.plan, "parent_id": t.parent_id,
+            "tokens": t.tokens}
 
 
 _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
@@ -144,7 +145,7 @@ aside{overflow:auto;display:flex;flex-direction:column;gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
 .card h2{font-size:12px;margin:0 0 6px;color:#fff;text-transform:uppercase;letter-spacing:.04em}
 .item{border-bottom:1px solid var(--line);padding:3px 0}.item:last-child{border:0}
-.s-succeeded{color:#7ee787}.s-failed{color:#ff7b72}.s-running{color:#8fc8ff}.s-queued,.s-cancelled{color:var(--mut)}
+.s-succeeded{color:#7ee787}.s-failed{color:#ff7b72}.s-running{color:#8fc8ff}.s-queued,.s-cancelled{color:var(--mut)}.s-waiting{color:#f0c674}
 a{color:var(--acc)}
 </style></head><body>
 <header>
@@ -206,7 +207,11 @@ async function state(){
     const flags=[a.isolated?'isolated':'',a.selectable?'selectable':'',a.stateful?'stateful':'',a.private_memory&&!a.isolated?'private-memory':''].filter(Boolean).join(' ');
     return '<div class=item><b>'+esc(a.name)+'</b> <span class=meta>'+esc(a.source)+' · '+esc(a.model)+'</span>'+(flags?'<br><span class=turn>'+esc(flags)+'</span>':'')+
       (a.routed_from.length?'<br><span class=meta>← '+esc(a.routed_from.join(', '))+'</span>':'')+(a.delegates.length?'<br><span class=meta>asks: '+esc(a.delegates.join(', '))+'</span>':'')+'</div>';}).join('')||'<span class=meta>none</span>';
-  q('#tasks').innerHTML=(s.tasks||[]).slice(0,12).map(t=>'<div class=item><span class="s-'+t.status+'">'+t.status+'</span> ['+t.id+'] '+esc(t.title)+(t.progress&&t.progress.length?'<br><span class=meta>'+esc(t.progress[t.progress.length-1])+'</span>':'')+'</div>').join('')||'<span class=meta>none</span>';
+  q('#tasks').innerHTML=(s.tasks||[]).slice(0,12).map(t=>{const pl=t.plan||[],dn=pl.filter(p=>p.status==='done'||p.status==='skipped').length;
+    const extra=[t.parent_id?'sub-task of '+t.parent_id:'',pl.length?'plan '+dn+'/'+pl.length:'',t.tokens?(t.tokens/1000).toFixed(1)+'k tokens':''].filter(Boolean).join(' | ');
+    const wait=t.status==='waiting'?(t.wait_kind==='subtasks'?'waiting for its sub-tasks':'asks: '+(t.question||'')+'  (reply: /answer '+t.id+' ...)'):'';
+    return '<div class=item><span class="s-'+t.status+'">'+t.status+'</span> ['+t.id+'] '+esc(t.title)+(extra?' <span class=meta>'+esc(extra)+'</span>':'')
+      +(wait?'<br><span class=s-waiting>'+esc(wait)+'</span>':'')+(t.progress&&t.progress.length?'<br><span class=meta>'+esc(t.progress[t.progress.length-1])+'</span>':'')+'</div>';}).join('')||'<span class=meta>none</span>';
   q('#sched').innerHTML=(s.schedules||[]).map(x=>'<div class=item>'+esc(x.summary)+'</div>').join('')||'<span class=meta>none</span>';
   const p=s.pairing||{pending:[],approved:[]};
   q('#pair').innerHTML=(p.pending.map(x=>'<div class=item>pending '+esc(x.channel)+':'+esc(x.sender_id)+' code <b>'+esc(x.code)+'</b></div>').join('')+

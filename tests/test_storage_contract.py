@@ -401,3 +401,53 @@ def test_restart_recovery_forgets_the_last_error(st):
     st.tasks.claim_next()
     assert st.tasks.recover_interrupted() == 1
     assert st.tasks.get(t.id).error is None  # an interrupted run is "continue", not "you failed"
+
+
+def test_task_plan_and_notes_roundtrip(st):
+    t = _task(st)
+    assert st.tasks.get(t.id).plan == [] and st.tasks.get(t.id).notes == {}
+    st.tasks.set_plan(t.id, [{"step": "a", "status": "done", "note": ""}, {"step": "b", "status": "pending", "note": ""}])
+    st.tasks.set_notes(t.id, {"url": "https://example.org"})
+    got = st.tasks.get(t.id)
+    assert [p["step"] for p in got.plan] == ["a", "b"] and got.notes == {"url": "https://example.org"}
+    assert "plan 1/2" in got.summary()
+    got.plan[0]["status"] = "x"  # returned copies must not alias stored state
+    assert st.tasks.get(t.id).plan[0]["status"] == "done"
+
+
+def test_subtask_waiting_and_ready_parents(st):
+    p = _task(st, "parent")
+    st.tasks.claim_next()
+    a = st.tasks.create("a", "g", agent=None, address=None, user_id="u", parent_id=p.id)
+    b = st.tasks.create("b", "g", agent=None, address=None, user_id="u", parent_id=p.id)
+    assert [c.id for c in st.tasks.children(p.id)] == [a.id, b.id] and a.parent_id == p.id
+    assert st.tasks.wait_for_children(p.id)
+    got = st.tasks.get(p.id)
+    assert got.status == "waiting" and got.wait_kind == "subtasks" and "waiting for its sub-tasks" in got.summary()
+    assert not st.tasks.answer(p.id, "user text")  # /answer cannot release a sub-task wait
+    assert st.tasks.expire_questions() == 0
+    assert st.tasks.ready_parents() == []
+    st.tasks.claim_next()
+    st.tasks.finish(a.id, "succeeded", result="A")
+    assert st.tasks.ready_parents() == []  # b still queued
+    st.tasks.cancel(b.id)
+    assert st.tasks.ready_parents() == [p.id]
+    assert st.tasks.answer(p.id, "results", kind="subtasks")
+    assert st.tasks.get(p.id).status == "queued" and st.tasks.ready_parents() == []
+    st.tasks.consume_answer(p.id)
+    assert st.tasks.get(p.id).wait_kind is None
+
+
+def test_a_question_cannot_be_answered_as_subtasks(st):
+    t = _task(st)
+    st.tasks.claim_next()
+    st.tasks.ask(t.id, "q", "d", 9e9)
+    assert not st.tasks.answer(t.id, "x", kind="subtasks") and st.tasks.answer(t.id, "x")
+
+
+def test_task_tokens_accumulate(st):
+    t = _task(st)
+    st.tasks.add_tokens(t.id, 100)
+    st.tasks.add_tokens(t.id, 50)
+    st.tasks.add_tokens(t.id, 0)
+    assert st.tasks.get(t.id).tokens == 150

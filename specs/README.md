@@ -25,7 +25,7 @@ with numbered requirements (e.g. `MEM-4`) so they can be referenced from issues,
 | 18 | [Logging and the web dashboard](18-logging-and-web-ui.md) | structured logs, per-turn tracing, levels/areas, redaction, live web UI |
 | 19 | [Storage backends](19-storage.md) | storage protocols, registry, sqlite/memory backends, behavioural contract |
 | 20 | [Agent management](20-agent-management.md) | drop-in agent files, routing rules, `/agent` switching, hot reload, `kiro-crew agent` |
-| 21 | [Autonomy](21-autonomy.md) | task completion criteria and verification, tool-call budget, stuck-loop detection |
+| 21 | [Autonomy](21-autonomy.md) | completion verification, asking the user, smarter retries, plan + notes, sub-tasks, tool and token budgets |
 
 ## Conventions
 

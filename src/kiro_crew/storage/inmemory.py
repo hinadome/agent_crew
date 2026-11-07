@@ -153,14 +153,15 @@ class InMemoryTaskStore:
 
     @staticmethod
     def _copy(t: S.Task) -> S.Task:
-        return replace(t, progress=list(t.progress))
+        return replace(t, progress=list(t.progress), plan=[dict(p) for p in t.plan], notes=dict(t.notes))
 
     def create(self, title: str, goal: str, *, agent: str | None, address: Address | None, user_id: str | None,
-               quiet_token: str | None = None, done_when: str | None = None) -> S.Task:
+               quiet_token: str | None = None, done_when: str | None = None,
+               parent_id: str | None = None) -> S.Task:
         now = time.time()
         t = S.Task(id=uuid.uuid4().hex[:8], title=title, goal=goal, status=S.QUEUED, agent=agent, address=address,
                    user_id=user_id, attempts=0, created_at=now, updated_at=now, quiet_token=quiet_token,
-                   done_when=done_when)
+                   done_when=done_when, parent_id=parent_id)
         with self._lock:
             self._tasks[t.id] = t
             self._not_before[t.id] = 0.0
@@ -231,13 +232,14 @@ class InMemoryTaskStore:
             if not t or t.status != S.RUNNING:
                 return False
             t.status, t.question, t.question_default, t.answer = S.WAITING, question, default, None
+            t.wait_kind = "user"
             t.ask_deadline, t.asks, t.updated_at = deadline, t.asks + 1, time.time()
             return True
 
-    def answer(self, task_id: str, text: str) -> bool:
+    def answer(self, task_id: str, text: str, *, kind: str = "user") -> bool:
         with self._lock:
             t = self._tasks.get(task_id)
-            if not t or t.status != S.WAITING:
+            if not t or t.status != S.WAITING or t.wait_kind != kind:
                 return False
             t.status, t.answer, t.attempts, t.updated_at = S.QUEUED, text, max(t.attempts - 1, 0), time.time()
             self._not_before[task_id] = 0.0
@@ -247,14 +249,49 @@ class InMemoryTaskStore:
         now = time.time()
         with self._lock:
             due = [(t.id, t.question_default) for t in self._tasks.values()
-                   if t.status == S.WAITING and t.ask_deadline is not None and t.ask_deadline <= now]
+                   if t.status == S.WAITING and t.wait_kind == "user" and t.ask_deadline is not None
+                   and t.ask_deadline <= now]
         return sum(self.answer(i, S.timeout_answer(d)) for i, d in due)
+
+    def set_plan(self, task_id: str, plan: _List[dict[str, str]]) -> None:
+        with self._lock:
+            if (t := self._tasks.get(task_id)):
+                t.plan, t.updated_at = [dict(p) for p in plan], time.time()
+
+    def set_notes(self, task_id: str, notes: dict[str, str]) -> None:
+        with self._lock:
+            if (t := self._tasks.get(task_id)):
+                t.notes, t.updated_at = dict(notes), time.time()
+
+    def add_tokens(self, task_id: str, n: int) -> None:
+        with self._lock:
+            if n > 0 and (t := self._tasks.get(task_id)):
+                t.tokens += n
 
     def consume_answer(self, task_id: str) -> None:
         with self._lock:
             t = self._tasks.get(task_id)
             if t:
-                t.question = t.question_default = t.answer = t.ask_deadline = None
+                t.question = t.question_default = t.answer = t.ask_deadline = t.wait_kind = None
+
+    def wait_for_children(self, task_id: str) -> bool:
+        with self._lock:
+            t = self._tasks.get(task_id)
+            if not t or t.status != S.RUNNING:
+                return False
+            t.status, t.wait_kind, t.answer, t.updated_at = S.WAITING, "subtasks", None, time.time()
+            return True
+
+    def children(self, parent_id: str) -> _List[S.Task]:
+        with self._lock:
+            kids = sorted((t for t in self._tasks.values() if t.parent_id == parent_id), key=lambda t: t.created_at)
+            return [self._copy(t) for t in kids]
+
+    def ready_parents(self) -> _List[str]:
+        with self._lock:
+            return [p.id for p in self._tasks.values()
+                    if p.status == S.WAITING and p.wait_kind == "subtasks"
+                    and not any(c.parent_id == p.id and c.status in S.ACTIVE for c in self._tasks.values())]
 
     def purge_finished(self, older_than_s: float) -> int:
         cutoff = time.time() - older_than_s

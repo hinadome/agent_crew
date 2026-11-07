@@ -300,8 +300,21 @@ _RESERVED = set(vars(logging.makeLogRecord({}))) | {"message", "asctime", "taskN
 # standard LogRecord attributes (plus ones added during formatting) to skip when harvesting extras
 
 
+def _plain(v: Any) -> Any:
+    """JSON-safe copy of a log field. Third-party libraries attach arbitrary objects to records; a single one
+    must never break the JSON log file or the dashboard API."""
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _plain(x) for k, x in v.items()}
+    return str(v)
+
+
 def _extra_fields(record: logging.LogRecord) -> dict[str, Any]:
-    return {k: v for k, v in vars(record).items() if k not in _RESERVED and not k.startswith("_") and k != "turn"}
+    return {k: _plain(v) for k, v in vars(record).items()
+            if k not in _RESERVED and not k.startswith("_") and k != "turn"}
 
 
 def _record_to_event(record: logging.LogRecord) -> LogEvent:
