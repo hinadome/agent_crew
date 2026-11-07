@@ -20,7 +20,7 @@ from ..core.context import AppContext
 from ..core.types import Address
 from ..memory.factory import make_store
 from ..security.approval import ApprovalHook
-from ..tasks.tools import report_progress_tool
+from ..tasks.tools import ask_user_tool, report_progress_tool
 from ..tools import resolve_tools
 from .budget import BudgetHook
 from .trace import TraceHook
@@ -55,6 +55,8 @@ class AgentFactory:
             tools += [self._delegate_tool(d, user_id, _depth, origin, session_id) for d in acfg.delegates]
         if task_id:
             tools.append(report_progress_tool(self.ctx, task_id))
+            if self.cfg.tasks.ask_user:
+                tools.append(ask_user_tool(self.ctx, task_id))
 
         owner_context = self.ctx.workspace.system_context(soul=acfg.use_soul, core_memory=acfg.use_core_memory)
         prompt = "\n\n".join(p for p in (acfg.system_prompt, owner_context, extra_prompt) if p)

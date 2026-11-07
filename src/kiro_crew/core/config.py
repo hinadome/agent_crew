@@ -215,6 +215,9 @@ class TasksConfig(_Cfg):
     verify: bool = True  # check finished tasks that declared `done_when` against it (one cheap model call)
     verify_all: bool = False  # also judge tasks without `done_when` against their goal
     max_verify_rounds: int = 2  # how many times the agent is sent back to fix an unmet result
+    ask_user: bool = True  # a running task may pause and ask the user a question (/answer ID text)
+    ask_timeout_s: int = 1800  # unanswered: the task continues with the default assumption it stated
+    max_questions: int = 3  # per task
 
 
 class LimitsConfig(_Cfg):

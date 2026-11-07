@@ -174,7 +174,7 @@ class InMemoryTaskStore:
     def list(self, *, user_id: str | None = None, active_only: bool = False, limit: int = 20) -> _List[S.Task]:
         with self._lock:
             items = [t for t in self._tasks.values()
-                     if (not user_id or t.user_id == user_id) and (not active_only or t.status in (S.QUEUED, S.RUNNING))]
+                     if (not user_id or t.user_id == user_id) and (not active_only or t.status in S.ACTIVE)]
             items.sort(key=lambda t: t.created_at, reverse=True)
             return [self._copy(t) for t in items[:limit]]
 
@@ -214,16 +214,47 @@ class InMemoryTaskStore:
         with self._lock:
             running = [t for t in self._tasks.values() if t.status == S.RUNNING]
             for t in running:
-                t.status, t.updated_at = S.QUEUED, time.time()
+                t.status, t.error, t.updated_at = S.QUEUED, None, time.time()
             return len(running)
 
     def cancel(self, task_id: str) -> bool:
         with self._lock:
             t = self._tasks.get(task_id)
-            if t and t.status in (S.QUEUED, S.RUNNING):
+            if t and t.status in S.ACTIVE:
                 t.status, t.updated_at = S.CANCELLED, time.time()
                 return True
             return False
+
+    def ask(self, task_id: str, question: str, default: str, deadline: float) -> bool:
+        with self._lock:
+            t = self._tasks.get(task_id)
+            if not t or t.status != S.RUNNING:
+                return False
+            t.status, t.question, t.question_default, t.answer = S.WAITING, question, default, None
+            t.ask_deadline, t.asks, t.updated_at = deadline, t.asks + 1, time.time()
+            return True
+
+    def answer(self, task_id: str, text: str) -> bool:
+        with self._lock:
+            t = self._tasks.get(task_id)
+            if not t or t.status != S.WAITING:
+                return False
+            t.status, t.answer, t.attempts, t.updated_at = S.QUEUED, text, max(t.attempts - 1, 0), time.time()
+            self._not_before[task_id] = 0.0
+            return True
+
+    def expire_questions(self) -> int:
+        now = time.time()
+        with self._lock:
+            due = [(t.id, t.question_default) for t in self._tasks.values()
+                   if t.status == S.WAITING and t.ask_deadline is not None and t.ask_deadline <= now]
+        return sum(self.answer(i, S.timeout_answer(d)) for i, d in due)
+
+    def consume_answer(self, task_id: str) -> None:
+        with self._lock:
+            t = self._tasks.get(task_id)
+            if t:
+                t.question = t.question_default = t.answer = t.ask_deadline = None
 
     def purge_finished(self, older_than_s: float) -> int:
         cutoff = time.time() - older_than_s
@@ -236,7 +267,7 @@ class InMemoryTaskStore:
 
     def active_session_ids(self) -> set[str]:
         with self._lock:
-            return {t.session_id for t in self._tasks.values() if t.status in (S.QUEUED, S.RUNNING)}
+            return {t.session_id for t in self._tasks.values() if t.status in S.ACTIVE}
 
 
 # ---- schedules ---------------------------------------------------------------------------------

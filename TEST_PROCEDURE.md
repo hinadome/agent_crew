@@ -30,7 +30,7 @@ uv run mypy                      # expect: Success: no issues found in 55 source
 ```bash
 uv run pytest -q -rs
 ```
-Expected: `421 passed, 30 deselected` (about 25 s). No network, no keys. The 30 deselected tests are the integration tests (Level 2/3).
+Expected: `439 passed, 30 deselected` (about 25 s). No network, no keys. The 30 deselected tests are the integration tests (Level 2/3).
 
 Useful variants:
 ```bash
@@ -118,6 +118,8 @@ Run inside `$K chat` unless stated. "Expect" lines are real outputs (times and i
 Tasks live in the DB and resume after a restart.
 
 Completion criteria (hermetic tests cover the verifier; the mock LLM cannot judge): `[[tool:start_task:{"title":"demo job","goal":"say done","done_when":"says done"}]]` stores the criteria; with the mock as reviewer the result is delivered with `(Completion could not be verified.)` because the mock never returns the required JSON. Guard rails: `uv run pytest tests/test_autonomy.py -q` (26 tests: stuck loops, budgets, verification). With a real LLM [NOT RUN], give a task a criterion it cannot meet and expect two fix rounds, then a `WARNING - not confirmed complete` message.
+
+Asking questions: covered by `uv run pytest tests/test_task_questions.py -q` (waiting without holding the worker, `/answer`, timeout default, owner-only, cancel, limits, retry prompts). The mock LLM cannot drive this manually, because its tool-marker syntax cannot nest a marker inside `start_task`'s arguments. With a real LLM [NOT RUN]: ask for something deliberately ambiguous as a background task; expect `Task [id] needs your input: ...`, `/tasks` showing `WAITING ... asks:`, then `/answer <id> <text>` -> `Thanks, the task continues.` and later `Task [id] done`. From a second terminal: `$K task list`, `$K task answer <id> <text>` (resumes within ~5 s). Set `tasks.ask_timeout_s: 20` to watch the timeout default.
 
 ### 5.4 Reminders and schedules (verified)
 ```

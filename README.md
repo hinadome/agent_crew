@@ -10,6 +10,7 @@ specialist agents, and runs long jobs in the background without blocking the cha
   (keyword or semantic+keyword), editable `SOUL.md` / `MEMORY.md`, and `/memory` to list or forget facts.
 - **Long-running tasks:** durable queue, resumable sessions, retries, timeouts, cancel, progress. Tasks can declare
   completion criteria (`done_when`); the result is **verified** and the agent is sent back to fix gaps.
+- **Asks when blocked:** a running task can pause and ask you one question (`/answer <id> <text>`); it frees its worker, survives restarts, and continues with its stated default if you do not answer. Failed attempts are retried with the error in the prompt.
 - **Guard rails for autonomy:** per-run tool-call budget and stuck-loop detection (steer first, then stop).
 - **Acts on its own:** reminders, recurring jobs and cron schedules, plus an optional **heartbeat** that only
   speaks when something needs you.
@@ -245,7 +246,12 @@ tasks that gave no criteria against their goal, or `tasks.verify: false` to swit
 
 `limits:` caps tool calls per chat turn / task run and detects an agent repeating the identical call. Past a limit the call is
 cancelled and the model is told why; if it ignores that, the run is stopped (chat: you get a message; task: it fails without
-retrying). Details and what is *not* covered: [specs/21-autonomy.md](specs/21-autonomy.md).
+retrying). 
+**Questions and retries.** A background task that hits a real fork can call `ask_user`: you get `Task [id] needs your input: ...`
+and answer with `/answer <id> <text>` (or `kiro-crew task answer <id> <text>`). While waiting it holds no worker and survives restarts;
+if you do not answer within `tasks.ask_timeout_s` (30 min) it continues with the default assumption it told you about. At most
+`tasks.max_questions` per task. A retry after an error or timeout now tells the agent what went wrong and to take a different approach.
+Details and what is *not* covered: [specs/21-autonomy.md](specs/21-autonomy.md).
 
 ## How it fits together
 

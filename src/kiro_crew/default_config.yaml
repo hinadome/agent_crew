@@ -62,6 +62,12 @@ tasks:
   verify: true
   verify_all: false               # true = also judge tasks that gave no criteria, against their goal
   max_verify_rounds: 2
+  # A running task may pause and ask you one question (ask_user). It becomes WAITING (no worker is held, survives
+  # restarts); answer with `/answer <id> <text>` in chat or `kiro-crew task answer <id> <text>`. No answer within
+  # ask_timeout_s: it continues with the default assumption it stated. Tasks without a chat to ask never ask.
+  ask_user: true
+  ask_timeout_s: 1800
+  max_questions: 3                # per task
 
 # ---- Guard rails against runaway agents (0 disables a limit; counted per chat turn / per task run) ----
 # Past a limit the tool call is cancelled and the model is told why (so it can change course or wrap up). If it keeps

@@ -243,3 +243,26 @@ async def test_cli_prompt_returns_only_after_the_reply(monkeypatch):
     await asyncio.wait_for(ch.quit.wait(), 5)
     assert events == ["prompt", "reply:hi", "prompt", "reply:again", "prompt"]
     await ch.stop()
+
+
+def test_task_cli_lists_and_answers_a_waiting_task(cli_cfg, capsys):
+    from kiro_crew.app import build_context
+    from kiro_crew.core.config import load_config
+
+    ctx = build_context(load_config(cli_cfg))
+    t = ctx.tasks.create("Trip", "goal", agent=None, address=None, user_id="u")
+    ctx.tasks.claim_next()
+    ctx.tasks.ask(t.id, "Which dates?", "next weekend", 9e9)
+    ctx.storage.close()
+
+    main(["-c", cli_cfg, "task", "list"])
+    out = capsys.readouterr().out
+    assert "WAITING" in out and "Which dates?" in out and f"/answer {t.id}" in out
+    main(["-c", cli_cfg, "task", "answer", t.id, "12-15", "December"])
+    assert "answered" in capsys.readouterr().out
+    main(["-c", cli_cfg, "task", "answer", t.id, "again"])
+    assert "not found, or the task is not waiting" in capsys.readouterr().out
+    ctx = build_context(load_config(cli_cfg))
+    got = ctx.tasks.get(t.id)
+    ctx.storage.close()
+    assert got.status == "queued" and got.answer == "12-15 December"

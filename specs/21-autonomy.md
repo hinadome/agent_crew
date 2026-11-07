@@ -43,13 +43,54 @@ get their own hook and counters. `0` disables a limit.
 
 Strands wraps hook exceptions in `EventLoopException`; `find_budget_error` unwraps the chain.
 
-## 3. Not covered (yet)
+## 3. Asking the user (WAITING)
 
-Token or money budgets, parallel sub-tasks, task dependencies, a task asking the user a question and resuming, structured per-task state,
+A task may pause to ask one clear question when a wrong guess would waste significant work.
+
+```
+RUNNING --ask_user--> WAITING --/answer or timeout--> QUEUED --claim--> RUNNING (resumes with the answer)
+```
+
+- Tool `ask_user(question, default_assumption)` (per task, `tasks/tools.py`). It stores the question, the default and a
+  deadline (`tasks.ask_timeout_s`, default 1800 s), sets the status to `waiting`, sends the question to the origin chat and
+  tells the model to reply with one line and stop. The runner sees `waiting` after the agent returns and parks the task:
+  no result is stored, no "done" message and no verification. The worker is free for other tasks, and the task timeout does
+  not tick while it waits.
+- Answering: `/answer <id> <text>` in chat (owner only) or `kiro-crew task answer <id> <text>` (works on the database; the running bot
+  notices within its 5 s poll). The task goes back to `queued`, the attempt counter is rolled back (an answer is not a retry),
+  and the resume prompt contains the question and the answer. The answer is cleared from the row once handed over; the agent's
+  saved conversation keeps it.
+- No answer in time: the worker loop's `expire_questions()` answers with the agent's own default ("did not answer in time ... proceed
+  with your stated default ... mention this in the result").
+- Limits: `tasks.max_questions` per task (the tool then tells the model to decide itself); no chat address (scheduled/heartbeat tasks)
+  means nobody is asked and the model assumes its default; `tasks.ask_user: false` restores "do not ask questions".
+- Waiting tasks survive restarts (recovery only touches `running`), are protected from session pruning, show as `WAITING ... asks:
+  <question>` in `/tasks`, `kiro-crew task list` and the dashboard, and can be cancelled.
+- Relies on the model obeying "stop after asking". If it keeps working anyway, the run still ends in the parked state when it returns, and the
+  work it did meanwhile is kept in the session. Further tool calls are not blocked.
+
+## 4. Smarter retries
+
+The retry prompt now depends on why the last attempt ended (`TaskRunner._prompt`):
+
+| Last attempt | Retry prompt |
+|---|---|
+| none (first run) | task + goal + criteria |
+| answer pending | the question, the answer, "continue" |
+| error | the error text, "do not repeat the same approach; state what you will do differently", then continue |
+| timeout | "work more efficiently, skip optional steps, deliver a partial result marked partial" |
+| crash / restart | "you were interrupted, continue" (recovery clears the stored error so this is not mistaken for a failure) |
+
+Each error/timeout retry also adds a progress note (`attempt N: retrying after: ...`). Attempts and backoff are unchanged, and
+budget stops are still never retried. This cannot make a weak model smarter; it only stops the retry from being blind.
+
+## 5. Not covered (yet)
+
+Token or money budgets, parallel sub-tasks, task dependencies, structured per-task state,
 explicit plans, learning from outcomes. A tool-call cap does not bound cost per call (a single huge tool result can still be expensive).
 
-## 4. Tests
+## 6. Tests
 
 `tests/test_autonomy.py`: hook rules (unit), runaway chat turn and runaway task (end to end), per-turn reset on cached agents,
 verdict parsing, fix-and-redeliver, bounded rounds with warning, inconclusive/failed reviewer, no-criteria, `verify_all`, switched off,
-`done_when` set via the tool. Storage contract: `done_when` round-trips on both backends.
+`done_when` set via the tool. `tests/test_task_questions.py`: ask/wait/answer end to end with a single worker, timeout default, owner-only `/answer`, cancel while waiting, question limit, no-chat case, prompt wording, retry prompts per failure kind. Storage contract (both backends): `done_when`, ask/answer/expire/consume, attempt rollback, recovery clearing errors. CLI: `kiro-crew task list|answer`.

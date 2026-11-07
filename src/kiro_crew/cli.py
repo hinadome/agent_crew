@@ -52,6 +52,14 @@ def _admin(args: argparse.Namespace) -> None:
                 print(f"approved {approved.channel}:{approved.sender_id}" if approved else "unknown or expired code")
             else:
                 print("revoked" if p.revoke(args.channel, args.sender_id) else "not found")
+        elif args.cmd == "task":
+            if args.action == "list":
+                for t in ctx.tasks.list(limit=30):
+                    print(t.summary())
+            else:
+                ok = ctx.tasks.answer(args.id, " ".join(args.text))
+                print("answered; the running bot resumes the task within seconds" if ok
+                      else "not found, or the task is not waiting for an answer")
         elif args.cmd == "schedule":
             if args.action == "list":
                 for s in ctx.schedules.list(include_system=True):
@@ -220,6 +228,12 @@ def main(argv: list[str] | None = None) -> None:
     add.add_argument("--selectable", action="store_true", default=None)
     add.add_argument("--stateful", action="store_true", default=None)
 
+    tk = sub.add_parser("task", help="list background tasks or answer a waiting task's question")
+    tks = tk.add_subparsers(dest="action", required=True)
+    tks.add_parser("list")
+    ans = tks.add_parser("answer")
+    ans.add_argument("id")
+    ans.add_argument("text", nargs="+")
     sc = sub.add_parser("schedule", help="list or cancel reminders/scheduled jobs")
     scs = sc.add_subparsers(dest="action", required=True)
     scs.add_parser("list")
@@ -257,7 +271,7 @@ def main(argv: list[str] | None = None) -> None:
         print("enabled channels:", [k for k, v in app.cfg.channels.items() if v.enabled])
         return
 
-    if args.cmd in ("pairing", "memory", "schedule", "prune"):
+    if args.cmd in ("pairing", "memory", "schedule", "task", "prune"):
         _admin(args)
         return
 

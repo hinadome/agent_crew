@@ -102,6 +102,7 @@ First try: type `hello, what can you do?`. Type `/help` for the commands.
 | `/model` , `/model NAME` | show / switch the LLM for this chat |
 | `/agents` , `/agent NAME` , `/agent reset` | list / switch / return to the default agent |
 | `/tasks` , `/cancel ID` | background tasks |
+| `/answer ID text` | answer a question a waiting background task asked you |
 | `/schedules` , `/unschedule ID` | reminders and recurring jobs |
 | `/memory` , `/memory search Q` , `/memory forget ID` | see or delete what it remembers |
 | `/approve` , `/deny` | answer a "may I run this?" question |
@@ -163,6 +164,7 @@ Expected: the lead agent starts a background task ("Started task ...") and the c
 you get `Task [id] done: ...`.
 Check: `/tasks`; the output file appears in `~/.kiro-crew/files/db-notes.md`. Cancel with `/cancel ID`.
 Tip: tell it what "done" means, for example `... Done when the file lists at least 3 sources.` The lead agent passes this as completion criteria; when the task ends, a reviewer checks the result and sends the agent back to fix gaps (twice at most), and you get a `WARNING` if it still falls short. A stuck agent (repeating the same call, or using far too many tool calls) is stopped; see `limits:` in the config.
+If the task hits a real fork it may pause and ask: `Task [id] needs your input: Which dates?`. The task shows as `WAITING` in `/tasks` and uses no worker. Reply `/answer <id> 12-15 December` (or `uv run kiro-crew task answer <id> 12-15 December` from a shell). No reply within 30 minutes: it carries on with the default assumption it told you. It asks at most 3 times (`tasks.max_questions`; `tasks.ask_user: false` turns asking off). If an attempt fails, the retry is told what failed and to try a different approach.
 The `researcher` agent needs the `web` tool (already in the sample config) to browse. Add a search key to enable
 search, not just page fetching: set `tool_options.web.search: brave` and `api_key` **(needs your account)**.
 

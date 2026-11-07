@@ -349,3 +349,55 @@ def test_task_done_when_roundtrip(st):
     t = st.tasks.create("t", "goal", agent=None, address=ADDR, user_id="u", done_when="file x exists")
     assert st.tasks.get(t.id).done_when == "file x exists"
     assert st.tasks.create("t2", "goal", agent=None, address=ADDR, user_id="u").done_when is None
+
+
+# ---- asking the user (WAITING) -------------------------------------------------------------------------
+def test_ask_pauses_a_running_task_and_answer_resumes_it(st):
+    t = _task(st)
+    assert not st.tasks.ask(t.id, "q?", "dflt", 9e9)  # only a RUNNING task can ask
+    st.tasks.claim_next()
+    assert st.tasks.ask(t.id, "Which dates?", "next weekend", 9e9)
+    w = st.tasks.get(t.id)
+    assert (w.status, w.question, w.question_default, w.asks) == ("waiting", "Which dates?", "next weekend", 1)
+    assert st.tasks.claim_next() is None  # a waiting task is not picked up by a worker
+    assert [x.id for x in st.tasks.list(active_only=True)] == [t.id]
+    assert t.session_id in st.tasks.active_session_ids()  # housekeeping must not prune its session
+    assert st.tasks.recover_interrupted() == 0  # and a restart leaves it waiting
+    assert st.tasks.answer(t.id, "12-15 Dec")
+    assert not st.tasks.answer(t.id, "again")  # no longer waiting
+    r = st.tasks.get(t.id)
+    assert (r.status, r.answer, r.attempts) == ("queued", "12-15 Dec", 0)  # answering is not a retry
+    assert st.tasks.claim_next().attempts == 1
+    st.tasks.consume_answer(t.id)
+    c = st.tasks.get(t.id)
+    assert (c.question, c.answer, c.question_default, c.ask_deadline) == (None, None, None, None)
+    assert c.asks == 1
+
+
+def test_unanswered_questions_expire_into_their_default(st):
+    a, b = _task(st, "a"), _task(st, "b")
+    st.tasks.claim_next()
+    st.tasks.claim_next()
+    st.tasks.ask(a.id, "q", "use X", 1.0)  # long overdue
+    st.tasks.ask(b.id, "q", "use Y", 9e9)  # not yet
+    assert st.tasks.expire_questions() == 1
+    got = st.tasks.get(a.id)
+    assert got.status == "queued" and "did not answer" in got.answer and "use X" in got.answer
+    assert st.tasks.get(b.id).status == "waiting"
+
+
+def test_waiting_tasks_can_be_cancelled_and_summarise_their_question(st):
+    t = _task(st)
+    st.tasks.claim_next()
+    st.tasks.ask(t.id, "Which dates?", "d", 9e9)
+    assert f"/answer {t.id}" in st.tasks.get(t.id).summary() and "Which dates?" in st.tasks.get(t.id).summary()
+    assert st.tasks.cancel(t.id) and st.tasks.get(t.id).status == "cancelled"
+
+
+def test_restart_recovery_forgets_the_last_error(st):
+    t = _task(st)
+    st.tasks.claim_next()
+    st.tasks.requeue(t.id, error="boom")
+    st.tasks.claim_next()
+    assert st.tasks.recover_interrupted() == 1
+    assert st.tasks.get(t.id).error is None  # an interrupted run is "continue", not "you failed"

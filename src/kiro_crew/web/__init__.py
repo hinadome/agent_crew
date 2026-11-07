@@ -123,7 +123,8 @@ class WebUI:
 
 def _task_view(t: Any) -> dict[str, Any]:
     return {"id": t.id, "title": t.title, "status": t.status, "attempts": t.attempts,
-            "user_id": t.user_id, "progress": t.progress[-3:], "updated_at": t.updated_at}
+            "user_id": t.user_id, "progress": t.progress[-3:], "updated_at": t.updated_at,
+            "question": t.question}
 
 
 _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>

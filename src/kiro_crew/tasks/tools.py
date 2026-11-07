@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from strands import ToolContext, tool
@@ -65,6 +66,40 @@ def _tasks(ctx: AppContext) -> Any:
         return "Cancelled." if ok else "Task not found or already finished."
 
     return [start_task, list_tasks, task_status, cancel_task]
+
+
+def ask_user_tool(ctx: AppContext, task_id: str) -> Any:
+    """Per-task tool: pause the task and ask the user a question (answered with /answer <id> <text>)."""
+
+    @tool
+    async def ask_user(question: str, default_assumption: str) -> str:
+        """Ask the user ONE question and pause this task until they answer. Use it only when a wrong guess would
+        waste significant work (a missing choice, a conflicting requirement), never for details you can reasonably
+        assume. After calling it, reply with one short line and stop; the task resumes with the answer.
+
+        Args:
+            question: One clear, self-contained question, with the options if there are any.
+            default_assumption: What you will assume if the user does not answer in time.
+        """
+        cfg = ctx.config.tasks
+        task = ctx.tasks.get(task_id)
+        if task is None or task.address is None:
+            return f"There is nobody to ask. Assume: {default_assumption}. State this assumption in your result."
+        if task.asks >= cfg.max_questions:
+            return (f"You have already asked {task.asks} questions; no more are allowed. Decide yourself, "
+                    f"state your assumptions in the result, and continue.")
+        deadline = time.time() + cfg.ask_timeout_s
+        if not ctx.tasks.ask(task_id, question.strip(), default_assumption.strip(), deadline):
+            return "Could not pause the task; decide yourself and continue."
+        mins = max(1, cfg.ask_timeout_s // 60)
+        if (runner := ctx.services.get("task_runner")):
+            await runner.tell(task, f"Task [{task_id}] needs your input: {question.strip()}\n"
+                                    f"Reply: /answer {task_id} <your answer>\n"
+                                    f"(No answer within {mins} min: I will assume {default_assumption.strip()})")
+        return ("Question sent. This task is now paused until the user answers. Reply with the single line "
+                "'Waiting for the user's answer.' and call no more tools.")
+
+    return ask_user
 
 
 def report_progress_tool(ctx: AppContext, task_id: str) -> Any:

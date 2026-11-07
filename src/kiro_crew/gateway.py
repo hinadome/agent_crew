@@ -31,6 +31,7 @@ HELP = """Commands:
 /model [name]           show or switch the LLM profile for this conversation
 /agent [name|reset]     show or switch the agent for this conversation (/agents lists them)
 /tasks                  list your background tasks
+/answer <id> <text>     answer a question from a waiting background task
 /cancel <id>            cancel a background task
 /schedules              list your reminders and scheduled jobs
 /unschedule <id>        cancel a reminder or scheduled job
@@ -242,6 +243,18 @@ class Gateway:
             case "/pair":
                 ch = self.channels[msg.address.channel]
                 return self._pair_command(arg, msg) if self._is_admin(ch, msg) else "Admins only."
+            case "/answer":
+                tid, _, text = arg.partition(" ")
+                if not tid or not text.strip():
+                    return "Usage: /answer <task id> <your answer>"
+                task = self.ctx.tasks.get(tid)
+                if task is None or task.user_id != self._user_key(msg):
+                    return "No such task."
+                if not self.ctx.tasks.answer(tid, text.strip()):
+                    return "That task is not waiting for an answer."
+                if (runner := self.ctx.services.get("task_runner")):
+                    runner.wake()
+                return "Thanks, the task continues."
             case "/cancel":
                 runner = self.ctx.services.get("task_runner")
                 if not arg or runner is None:

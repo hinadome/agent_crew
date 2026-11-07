@@ -12,6 +12,8 @@ from ..core.types import Address
 from ..memory.db import Database
 
 QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED = "queued", "running", "succeeded", "failed", "cancelled"
+WAITING = "waiting"  # paused: the agent asked the user a question and no worker is held meanwhile
+ACTIVE = (QUEUED, RUNNING, WAITING)
 TERMINAL = {SUCCEEDED, FAILED, CANCELLED}
 
 _SCHEMA = """
@@ -23,6 +25,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at REAL NOT NULL, updated_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, not_before);
 """
+
+
+def timeout_answer(default: str | None) -> str:
+    return ("(The user did not answer in time.) Proceed with your stated default assumption: "
+            + (default or "use your best judgement") + ". Mention this assumption in your final result.")
 
 
 @dataclass
@@ -42,6 +49,11 @@ class Task:
     updated_at: float = 0.0
     quiet_token: str | None = None  # a result starting with this is not delivered (e.g. HEARTBEAT_OK)
     done_when: str | None = None  # completion criteria the result is verified against
+    question: str | None = None  # set while WAITING (and until the answer has been handed to the agent)
+    question_default: str | None = None  # what the agent will assume if nobody answers in time
+    answer: str | None = None
+    ask_deadline: float | None = None
+    asks: int = 0  # questions asked so far (capped by tasks.max_questions)
 
     @property
     def session_id(self) -> str:
@@ -49,6 +61,8 @@ class Task:
 
     def summary(self) -> str:
         last = f" | last: {self.progress[-1]}" if self.progress else ""
+        if self.status == WAITING and self.question:
+            last = f" | asks: {self.question}  (reply: /answer {self.id} <text>)"
         return f"[{self.id}] {self.status.upper()} - {self.title}{last}"
 
 
@@ -56,7 +70,8 @@ def _row_to_task(r: Any) -> Task:
     addr = Address(r["channel"], r["conversation_id"], r["thread_id"]) if r["channel"] else None
     return Task(r["id"], r["title"], r["goal"], r["status"], r["agent"], addr, r["user_id"], r["attempts"],
                 json.loads(r["progress"]), r["result"], r["error"], r["created_at"], r["updated_at"],
-                r["quiet_token"], r["done_when"])
+                r["quiet_token"], r["done_when"], r["question"], r["question_default"], r["answer"],
+                r["ask_deadline"], r["asks"] or 0)
 
 
 class TaskStore:
@@ -67,6 +82,9 @@ class TaskStore:
         db.script(_SCHEMA)
         db.ensure_column("tasks", "quiet_token", "TEXT")  # added after v0.1: upgrade older databases
         db.ensure_column("tasks", "done_when", "TEXT")
+        for col, typ in (("question", "TEXT"), ("question_default", "TEXT"), ("answer", "TEXT"),
+                         ("ask_deadline", "REAL"), ("asks", "INTEGER NOT NULL DEFAULT 0")):
+            db.ensure_column("tasks", col, typ)
 
     def create(self, title: str, goal: str, *, agent: str | None, address: Address | None,
                user_id: str | None, quiet_token: str | None = None, done_when: str | None = None) -> Task:
@@ -88,7 +106,7 @@ class TaskStore:
             sql += " AND user_id=?"
             params.append(user_id)
         if active_only:
-            sql += " AND status IN ('queued','running')"
+            sql += " AND status IN ('queued','running','waiting')"
         rows = self.db.query(sql + " ORDER BY created_at DESC LIMIT ?", [*params, limit])
         return [_row_to_task(r) for r in rows]
 
@@ -124,17 +142,44 @@ class TaskStore:
 
     def recover_interrupted(self) -> int:
         """On startup: tasks left 'running' by a crash go back to the queue; they resume from their session."""
-        return self.db.execute("UPDATE tasks SET status=?, updated_at=? WHERE status=?",
+        # error cleared: an interrupted run (crash/restart) is "continue", not "you failed, try differently"
+        return self.db.execute("UPDATE tasks SET status=?, error=NULL, updated_at=? WHERE status=?",
                                (QUEUED, time.time(), RUNNING)).rowcount
 
     def active_session_ids(self) -> set[str]:
         """Session ids of queued/running tasks (housekeeping must never prune these)."""
-        return {f"task-{r['id']}" for r in self.db.query("SELECT id FROM tasks WHERE status IN ('queued','running')")}
+        return {f"task-{r['id']}" for r in self.db.query("SELECT id FROM tasks WHERE status IN ('queued','running','waiting')")}
 
     def purge_finished(self, older_than_s: float) -> int:
         return self.db.execute("DELETE FROM tasks WHERE status IN ('succeeded','failed','cancelled') "
                                "AND updated_at < ?", (time.time() - older_than_s,)).rowcount
 
     def cancel(self, task_id: str) -> bool:
-        return self.db.execute("UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status IN ('queued','running')",
+        return self.db.execute("UPDATE tasks SET status=?, updated_at=? WHERE id=? "
+                               "AND status IN ('queued','running','waiting')",
                                (CANCELLED, time.time(), task_id)).rowcount > 0
+
+    # -- asking the user ---------------------------------------------------------------------------
+    def ask(self, task_id: str, question: str, default: str, deadline: float) -> bool:
+        """RUNNING -> WAITING with a question. The worker is released; the task survives restarts."""
+        return self.db.execute(
+            "UPDATE tasks SET status=?, question=?, question_default=?, answer=NULL, ask_deadline=?, "
+            "asks=asks+1, updated_at=? WHERE id=? AND status=?",
+            (WAITING, question, default, deadline, time.time(), task_id, RUNNING)).rowcount > 0
+
+    def answer(self, task_id: str, text: str) -> bool:
+        """WAITING -> QUEUED with the answer. The attempt counter is rolled back: an answer is not a retry."""
+        return self.db.execute(
+            "UPDATE tasks SET status=?, answer=?, not_before=0, attempts=MAX(attempts-1,0), updated_at=? "
+            "WHERE id=? AND status=?", (QUEUED, text, time.time(), task_id, WAITING)).rowcount > 0
+
+    def expire_questions(self) -> int:
+        """Questions nobody answered in time are answered with the agent's own stated default."""
+        now = time.time()
+        rows = self.db.query("SELECT id, question_default FROM tasks WHERE status=? AND ask_deadline<=?",
+                             (WAITING, now))
+        return sum(self.answer(r["id"], timeout_answer(r["question_default"])) for r in rows)
+
+    def consume_answer(self, task_id: str) -> None:
+        self.db.execute("UPDATE tasks SET question=NULL, question_default=NULL, answer=NULL, ask_deadline=NULL "
+                        "WHERE id=?", (task_id,))
