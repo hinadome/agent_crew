@@ -1,0 +1,193 @@
+# kiro-crew configuration.  ${VAR} and ${VAR:-default} are read from the environment.
+workspace: ~/.kiro-crew          # SOUL.md, MEMORY.md, files/ and the SQLite database live here
+entry_agent: main
+# plugins: [my_package.my_plugin]  # modules that register extra providers/channels/tools/memory backends
+
+# ---- LLMs: define as many profiles as you like; switch by changing `default` (or /model in chat) ----
+models:
+  default: claude
+  # fallback: [gpt]             # optional: automatic failover order if the default errors/throttles
+  # aux: haiku                  # optional: cheaper model for memory extraction & summaries
+  profiles:
+    claude:                       # Amazon Bedrock (uses your AWS credentials; `aws login` works)
+      provider: bedrock
+      model_id: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      client: {region_name: "${AWS_REGION:-us-east-1}"}
+      params: {temperature: 0.3}
+    haiku:
+      provider: bedrock
+      model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+      client: {region_name: "${AWS_REGION:-us-east-1}"}
+    gpt:                          # OpenAI (or any OpenAI-compatible server via client.base_url)
+      provider: openai
+      model_id: gpt-4o
+      client: {api_key: "${OPENAI_API_KEY}"}
+    claude-direct:                # Anthropic API
+      provider: anthropic
+      model_id: claude-sonnet-4-5
+      client: {api_key: "${ANTHROPIC_API_KEY}"}
+      params: {max_tokens: 4096}
+    local:                        # Ollama
+      provider: ollama
+      model_id: llama3.2
+      client: {host: "http://localhost:11434"}
+    gemini:                       # anything LiteLLM supports
+      provider: litellm
+      model_id: gemini/gemini-2.0-flash
+      client: {api_key: "${GEMINI_API_KEY}"}
+
+# ---- Memory ----
+memory:
+  backend: sqlite                 # sqlite = keyword (FTS5) | hybrid = keyword + semantic (needs options.embedder)
+  # backend: hybrid
+  # options:
+  #   embedder: {provider: openai, model: text-embedding-3-small, api_key: "${OPENAI_API_KEY}"}
+  #   # providers: openai (any OpenAI-compatible URL via base_url) | ollama | bedrock
+  scope: user                     # user = private per sender | shared = one memory for everyone
+  auto_extract: true              # distil durable facts from chats every N turns
+  extract_every_n_turns: 5
+conversation:
+  strategy: summarizing           # old turns get summarised instead of dropped
+  preserve_recent_messages: 10
+
+# ---- Long-running background work ----
+tasks:
+  enabled: true
+  workers: 2
+  max_attempts: 3
+  task_timeout_s: 3600
+
+# ---- Scheduler: reminders and recurring jobs the agent creates ("remind me at 9", "every morning...") ----
+scheduler:
+  enabled: true
+  timezone: UTC                   # IANA name, e.g. Europe/Berlin; used for cron and "at <time>"
+# Heartbeat: periodically run the checklist in <workspace>/HEARTBEAT.md; only speaks if something needs you.
+heartbeat:
+  enabled: false
+  every: 2h
+  target: "cli:local"             # "<channel>:<conversation_id>" to notify, e.g. "discord:123456789"
+
+# ---- Sandbox for run_shell / run_python (add `sandbox` to an agent's tools) ----
+sandbox:
+  backend: docker                 # docker | host (UNSAFE) | none.  Fails closed if Docker is missing.
+  image: python:3.12-slim
+  network: false
+  timeout_s: 60
+
+# ---- Per-tool settings ----
+tool_options:
+  web:
+    # search: brave               # brave | tavily | searxng   (omit to keep only web_fetch)
+    # api_key: "${BRAVE_API_KEY}"
+    # url: "https://searx.example.org"   # for searxng
+    allow_private: false          # keep false: blocks fetching localhost / internal addresses (SSRF)
+
+# ---- Housekeeping: prune old data (0 keeps forever) ----
+housekeeping:
+  enabled: true
+  session_retention_days: 90
+  task_retention_days: 30
+
+# ---- Logging & visibility ----
+logging:
+  level: INFO                     # base level for kiro_crew.*  (DEBUG shows every step)
+  # areas:                        # raise/lower specific areas; DEBUG here is how you get full visibility
+  #   gateway: debug              # inbound msg, auth, which agent/model, reply
+  #   agents: debug               # tool calls, model calls, messages (per turn)
+  #   tasks: debug
+  #   scheduler: debug
+  #   memory: info
+  #   tools: debug                # web_fetch targets, sandbox commands
+  # file: ~/.kiro-crew/kiro-crew.log   # also write a rotating log file
+  # json: false                   # set true for one JSON object per line (ingest into a log system)
+  quiet_console: false            # true = console stays at INFO while file/web UI capture DEBUG
+
+# Read-only web dashboard: live logs (streamed), tasks, schedules, pairing. Bind locally; set a token.
+web_ui:
+  enabled: false
+  host: 127.0.0.1
+  port: 8787
+  token: "${KIRO_WEB_TOKEN:-}"    # required to view; leave blank only on a trusted machine
+
+approval_timeout_s: 300           # unanswered /approve requests are denied after this
+# admins: ["discord:1234567890"]  # may use /pair in chat (the local CLI is always admin)
+
+# ---- Adding agents --------------------------------------------------------------------------------------
+# The fastest way: drop a markdown file into <workspace>/agents/<name>.md -- settings in a front-matter block, the
+# system prompt as the body. A running bot picks it up within seconds (no restart); a broken file is rejected and the
+# old agents keep running. Or use the CLI:
+#     kiro-crew agent add faq --template public --delegate-of main --prompt "You answer product FAQs."
+#     kiro-crew agent list | show NAME | validate | remove NAME | reload
+# `isolated: true` makes a low-trust, public-facing agent: it never sees your SOUL.md / MEMORY.md, and gets its own
+# files folder and its own long-term memory. `selectable: true` lets users switch to it with /agent <name>.
+agent_files:
+  dir: agents                     # relative to the workspace
+  watch: true                     # auto-reload when files or this config change
+  interval_s: 3
+
+# Pick the agent per message (first match wins; then the channel's `agent:`, then entry_agent).
+# Users can also override per conversation with /agent <name> (only agents marked `selectable`, or any for admins).
+# routes:
+#   - {agent: support, channel: discord, group: true}     # all Discord server/group chats -> support
+#   - {agent: personal, channel: telegram, user: "12345"}  # one person on Telegram -> personal
+#   - {agent: research, conversation: "C0123ABCD"}         # one Slack channel -> research
+
+# ---- Agents (the "crew"). The entry agent can delegate to others, which appear to it as tools. ----
+agents:
+  main:
+    description: Personal assistant and crew lead.
+    system_prompt: |
+      You are the lead of a small crew of AI specialists. Answer simply questions yourself. Delegate focused
+      work to specialists via their ask_* tools. For anything long or multi-step, call start_task so it runs
+      in the background and tell the user it has started. Store lasting facts with the memory tools.
+      For reminders and recurring jobs call current_time first, then remind_me or schedule_job with an absolute
+      time (e.g. 'at 2026-11-07 09:00') or an interval.
+    tools: [time, tasks, schedule, files, core_memory]
+    delegates: [researcher, coder]
+  researcher:
+    # stateful: true                # keep its own conversation across calls (default: a fresh agent every call)
+    description: Research specialist. Gathers and synthesises information; returns a concise, sourced summary.
+    system_prompt: You are a meticulous researcher. Be factual, cite sources, flag uncertainty.
+    tools: [time, files, web]
+  coder:
+    description: Software engineer. Writes and reviews code, explains technical trade-offs.
+    system_prompt: You are a senior software engineer. Write correct, minimal, well-explained code.
+    model: claude
+    tools: [files, sandbox]
+    require_approval: [run_shell, run_python]   # the user must /approve each command in chat
+
+# ---- MCP servers (optional): reference by name from an agent's `mcp_servers` ----
+mcp_servers: []
+#  - {name: docs, command: uvx, args: ["awslabs.aws-documentation-mcp-server@latest"]}
+
+# ---- Channels. allow_from is REQUIRED for chat platforms: empty means nobody may talk to the bot. ----
+# Ids appear in the log when an unauthorised sender writes to the bot. "*" allows everyone (not advised).
+# Set `access: pairing` on a channel to let strangers request a code instead: you approve it with
+#   kiro-crew pairing approve <CODE>      (or /pair approve <CODE> in chat as an admin)
+channels:
+  cli:
+    enabled: true
+  discord:
+    enabled: false
+    token: "${DISCORD_TOKEN}"
+    allow_from: []                # Discord user ids
+  slack:
+    enabled: false
+    bot_token: "${SLACK_BOT_TOKEN}"
+    app_token: "${SLACK_APP_TOKEN}"
+    allow_from: []                # Slack member ids (U...)
+  telegram:
+    enabled: false
+    token: "${TELEGRAM_BOT_TOKEN}"
+    allow_from: []                # Telegram numeric user ids
+  whatsapp:
+    enabled: false
+    access_token: "${WHATSAPP_ACCESS_TOKEN}"
+    phone_number_id: "${WHATSAPP_PHONE_NUMBER_ID}"
+    verify_token: "${WHATSAPP_VERIFY_TOKEN}"
+    app_secret: "${WHATSAPP_APP_SECRET}"
+    port: 8080
+    allow_from: []                # phone numbers, e.g. "15551234567"
+
+# identities:                     # link one person across channels so they share memory
+#   alice: ["discord:1234567890", "slack:U0ABCDEF", "telegram:42"]

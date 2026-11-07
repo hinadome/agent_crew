@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install (all extras so no adapter test is skipped)
+        run: uv sync --frozen --all-extras --python ${{ matrix.python-version }}
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Type check
+        run: uv run mypy
+      - name: Unit + contract + end-to-end tests (hermetic: no network, keys or Docker)
+        run: uv run pytest -q -rs
+      - name: Config smoke test
+        run: |
+          mkdir smoke && cd smoke
+          uv run --project .. kiro-crew init
+          uv run --project .. kiro-crew check
+
+  # Real infrastructure: outbound HTTPS/TLS, a real MCP subprocess, and a real Docker daemon (present on the
+  # runner). Provider / chat-platform tests run only if you add the matching KIRO_IT_* repository secrets;
+  # otherwise they skip with a reason (visible via -rs). Not run on pull requests so forks never see secrets.
+  integration:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-extras --python 3.12
+      - name: Integration tests
+        env:
+          KIRO_IT_PROVIDER: ${{ secrets.KIRO_IT_PROVIDER }}
+          KIRO_IT_MODEL_ID: ${{ secrets.KIRO_IT_MODEL_ID }}
+          KIRO_IT_API_KEY: ${{ secrets.KIRO_IT_API_KEY }}
+          KIRO_IT_BRAVE_KEY: ${{ secrets.KIRO_IT_BRAVE_KEY }}
+          KIRO_IT_TELEGRAM_TOKEN: ${{ secrets.KIRO_IT_TELEGRAM_TOKEN }}
+          KIRO_IT_DISCORD_TOKEN: ${{ secrets.KIRO_IT_DISCORD_TOKEN }}
+          KIRO_IT_SLACK_BOT_TOKEN: ${{ secrets.KIRO_IT_SLACK_BOT_TOKEN }}
+          KIRO_IT_SLACK_APP_TOKEN: ${{ secrets.KIRO_IT_SLACK_APP_TOKEN }}
+        run: uv run pytest -m integration -q -rs

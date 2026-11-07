@@ -1,0 +1,69 @@
+[project]
+name = "kiro-crew"
+version = "0.1.0"
+description = "Modular, multi-channel, multi-LLM agent crew built on Strands Agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.14.3",
+    "pyyaml>=6.0.3",
+    "strands-agents[anthropic,litellm,ollama,openai]>=1.64.0",
+    "croniter>=6.2.4",
+]
+
+[project.optional-dependencies]
+discord = ["discord-py>=2.7.1"]
+slack = ["slack-bolt>=1.30.0", "aiohttp>=3.9"]
+whatsapp = ["aiohttp>=3.9"]
+# Telegram needs nothing extra (uses httpx long-polling).
+all = ["discord-py>=2.7.1", "slack-bolt>=1.30.0", "aiohttp>=3.9"]
+semantic = [
+    "numpy>=2.4.6",
+]
+
+[project.scripts]
+kiro-crew = "kiro_crew.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kiro_crew"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "numpy>=2.4.6",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "ruff>=0.17.4",
+    "types-pyyaml>=6.0.12.20261103",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "integration: touches real infrastructure (network, Docker, MCP subprocess, provider/channel credentials); deselected by default, run with: pytest -m integration -rs",
+]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["C408", "S101", "PLR2004"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/kiro_crew"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
