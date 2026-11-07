@@ -41,10 +41,45 @@ The brain is an LLM. Choose ONE of these. In `kiro-crew.yaml`, set `models.defau
 | Option | Cost | What to do |
 |---|---|---|
 | A. Amazon Bedrock (the sample default, profile `claude`) | AWS usage | `aws login` or set AWS credentials; check Bedrock model access in your region **(needs your account)** |
-| B. OpenAI (`gpt`) | API usage | `export OPENAI_API_KEY=...` and set `models.default: gpt` **(needs your account)** |
+| B. OpenAI (`gpt`), or any OpenAI-compatible URL (see below) | API usage | `export OPENAI_API_KEY=...` and set `models.default: gpt` **(needs your account)** |
 | C. Anthropic (`claude-direct`) | API usage | `export ANTHROPIC_API_KEY=...` and set `models.default: claude-direct` **(needs your account)** |
 | D. Ollama, local (`local`) | free | install Ollama, `ollama pull llama3.2`, set `models.default: local` |
 | E. No LLM at all | free | the mock server in [TEST_PROCEDURE.md](TEST_PROCEDURE.md) (Level 4). Good for learning the commands, not for smart answers. |
+
+### Using an OpenAI-compatible server at your own URL
+
+Works for vLLM, LM Studio, a LiteLLM proxy, OpenRouter, a company gateway, or anything that speaks the OpenAI
+chat-completions API. Use `provider: openai` and set `client.base_url`:
+
+```yaml
+models:
+  default: mygw
+  profiles:
+    mygw:
+      provider: openai
+      model_id: my-model-name                  # exactly the name your server expects
+      client:
+        base_url: "https://llm.example.com/v1" # use the path your server documents (usually ends in /v1)
+        api_key: "${MYGW_API_KEY}"             # env var; use "not-needed" if the server has no auth
+      params: {temperature: 0.3}               # optional
+```
+
+```bash
+export MYGW_API_KEY=...
+uv run kiro-crew check
+uv run kiro-crew chat
+```
+
+- Everything under `client:` is passed to the OpenAI client, so options such as `default_headers` (custom auth
+  header) or `timeout` also go there.
+- kiro-crew does not add `/v1` for you. A 404 usually means a wrong path.
+- Several servers: one profile each, switch with `/model NAME`; `models.fallback: [other]` gives automatic failover.
+- Change any agent that still says `model: claude` (the sample `coder`), or it will still try Bedrock.
+- `memory.backend: hybrid` has its own embedder URL under `memory.options.embedder` (`base_url`); your server must
+  support `/embeddings`.
+- Agents with tools need a server and model that support OpenAI-style tool calling. Plain chat does not.
+- Verified only against a local mock server (including tool calls), not your real endpoint. If chat fails, run
+  `uv run kiro-crew -v chat` and read the error line.
 
 Important: the sample config pins the `coder` agent to `model: claude` (Bedrock). If you are not using Bedrock,
 change it to your profile name (or delete that line), or `coder` will try Bedrock.
