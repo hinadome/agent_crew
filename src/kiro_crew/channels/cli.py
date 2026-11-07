@@ -23,14 +23,24 @@ class CLIChannel(Channel):
     async def start(self, on_message: MessageHandler) -> None:
         async def loop() -> None:
             print("kiro-crew ready. Type a message, /help for commands, Ctrl-D to quit.")
+            pending: set[asyncio.Task[Any]] = set()
             while True:
                 try:
                     line = await asyncio.to_thread(input, "you> ")
                 except EOFError:
+                    # let in-flight turns finish (piped input) before shutting down
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
                     self.quit.set()  # tell the app to shut down
                     return
                 if line.strip():
-                    await on_message(InboundMessage(self.address, "local", line, "you"))
+                    # Dispatch concurrently so /approve can be read while a turn waits
+                    # for approval; the gateway lock still serialises normal turns.
+                    t: asyncio.Task[Any] = asyncio.ensure_future(
+                        on_message(InboundMessage(self.address, "local", line, "you"))
+                    )
+                    pending.add(t)
+                    t.add_done_callback(pending.discard)
 
         self._task = asyncio.create_task(loop(), name="cli-input")
 

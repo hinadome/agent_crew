@@ -167,3 +167,40 @@ def test_schedule_and_prune_cli(cli_cfg, capsys):
     assert "not found" in capsys.readouterr().out
     main(["-c", cli_cfg, "prune"])
     assert "sessions" in capsys.readouterr().out
+
+
+async def test_cli_channel_reads_input_while_a_turn_is_pending(monkeypatch):
+    """Regression: /approve typed during a pending turn must be read, not queued behind it."""
+    import asyncio
+
+    from kiro_crew.channels.cli import CLIChannel
+
+    lines = iter(["slow turn", "/approve"])
+
+    def fake_input(_prompt: str = "") -> str:
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    release = asyncio.Event()
+    seen: list[str] = []
+
+    async def handler(msg):
+        seen.append(msg.text)
+        if msg.text == "slow turn":
+            await asyncio.wait_for(release.wait(), 5)  # blocks until /approve arrives
+        else:
+            release.set()
+
+    ch = CLIChannel.__new__(CLIChannel)
+    ch._task = None
+    ch.quit = asyncio.Event()
+    from kiro_crew.core.types import Address
+
+    ch.address = Address("cli", "local")
+    await ch.start(handler)
+    await asyncio.wait_for(ch.quit.wait(), 5)
+    assert seen == ["slow turn", "/approve"]
+    await ch.stop()
