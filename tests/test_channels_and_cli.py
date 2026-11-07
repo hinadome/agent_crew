@@ -174,6 +174,7 @@ async def test_cli_channel_reads_input_while_a_turn_is_pending(monkeypatch):
     import asyncio
 
     from kiro_crew.channels.cli import CLIChannel
+    from kiro_crew.core.types import OutboundMessage
 
     lines = iter(["slow turn", "/approve"])
 
@@ -190,12 +191,15 @@ async def test_cli_channel_reads_input_while_a_turn_is_pending(monkeypatch):
     async def handler(msg):
         seen.append(msg.text)
         if msg.text == "slow turn":
-            await asyncio.wait_for(release.wait(), 5)  # blocks until /approve arrives
+            # like an approval request: speak mid-turn, then block until /approve arrives
+            await ch.send(OutboundMessage(ch.address, "Approval needed"))
+            await asyncio.wait_for(release.wait(), 5)
         else:
             release.set()
 
     ch = CLIChannel.__new__(CLIChannel)
     ch._task = None
+    ch._sent = None
     ch.quit = asyncio.Event()
     from kiro_crew.core.types import Address
 
@@ -203,4 +207,39 @@ async def test_cli_channel_reads_input_while_a_turn_is_pending(monkeypatch):
     await ch.start(handler)
     await asyncio.wait_for(ch.quit.wait(), 5)
     assert seen == ["slow turn", "/approve"]
+    await ch.stop()
+
+
+async def test_cli_prompt_returns_only_after_the_reply(monkeypatch):
+    """The next 'you>' prompt must not be shown before the agent has answered."""
+    import asyncio
+
+    from kiro_crew.channels.cli import CLIChannel
+    from kiro_crew.core.types import Address, OutboundMessage
+
+    events: list[str] = []
+    lines = iter(["hi", "again"])
+
+    def fake_input(_prompt: str = "") -> str:
+        events.append("prompt")
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    ch = CLIChannel.__new__(CLIChannel)
+    ch._task = None
+    ch._sent = None
+    ch.quit = asyncio.Event()
+    ch.address = Address("cli", "local")
+
+    async def handler(msg):
+        await asyncio.sleep(0.2)
+        events.append(f"reply:{msg.text}")
+        await ch.send(OutboundMessage(ch.address, "ok"))
+
+    await ch.start(handler)
+    await asyncio.wait_for(ch.quit.wait(), 5)
+    assert events == ["prompt", "reply:hi", "prompt", "reply:again", "prompt"]
     await ch.stop()
